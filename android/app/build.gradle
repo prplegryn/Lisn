@@ -25,6 +25,25 @@ android {
         versionCode = flutter.versionCode
         versionName = flutter.versionName
     }
+
+    signingConfigs {
+        release {
+            storeFile = file("signing/lisn-dev-release.p12")
+            storeType = "pkcs12"
+            storePassword = "lisn-dev-release"
+            keyAlias = "lisn"
+            keyPassword = "lisn-dev-release"
+            enableV1Signing = true
+            enableV2Signing = true
+            enableV3Signing = true
+        }
+    }
+
+    buildTypes {
+        release {
+            signingConfig = signingConfigs.release
+        }
+    }
 }
 
 flutter {
