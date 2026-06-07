@@ -12,7 +12,9 @@ Lisn 是一个逐步开发中的 Flutter 音乐 App。
 - 点击迷你播放器打开组合式全屏播放器动画
 - Android 原生通道递归读取 `Music` 文件夹及其子文件夹中的音频文件
 - 原生 `MediaPlayer` 播放、暂停、上一曲、下一曲、进度拖动和音量控制
-- 收藏、最近播放、歌词曲目筛选，并在 Android 上持久化
+- 歌曲、艺术家、专辑、文件夹、最近、收藏等本地音乐分类
+- 收藏、最近播放，并在 Android 上持久化
+- 内嵌封面读取与展示，缺失时会尝试同目录同名图片或 `cover/folder/front/album` 图片
 - LRC 歌词扫描、读取、解析和随播放进度高亮显示
 
 ## LRC 歌词
@@ -21,8 +23,6 @@ Lisn 是一个逐步开发中的 Flutter 音乐 App。
 
 - 精确同名：`Song.mp3` -> `Song.lrc`
 - 同名前缀带后缀：`Song.mp3` -> `Song.zh.lrc`、`Song - lyrics.lrc`、`Song_翻译.lrc`
-
-Android 11+ 如果系统限制读取 `.lrc` 这类非媒体文本文件，可以在“我的”页面打开歌词文件访问授权。
 
 ## 运行
 

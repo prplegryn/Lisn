@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -60,32 +61,40 @@ class LisnColors {
   static const Color teal = Color(0xFF00C2A8);
 }
 
-enum LibraryMode { all, recent, favorites, lyrics }
+enum LibraryMode { songs, artists, albums, folders, recent, favorites }
 
 extension LibraryModeLabel on LibraryMode {
   String get label {
     switch (this) {
-      case LibraryMode.all:
-        return '全部';
+      case LibraryMode.songs:
+        return '歌曲';
+      case LibraryMode.artists:
+        return '艺术家';
+      case LibraryMode.albums:
+        return '专辑';
+      case LibraryMode.folders:
+        return '文件夹';
       case LibraryMode.recent:
         return '最近';
       case LibraryMode.favorites:
         return '收藏';
-      case LibraryMode.lyrics:
-        return '歌词';
     }
   }
 
   IconData get icon {
     switch (this) {
-      case LibraryMode.all:
+      case LibraryMode.songs:
         return Icons.library_music_rounded;
+      case LibraryMode.artists:
+        return Icons.mic_external_on_rounded;
+      case LibraryMode.albums:
+        return Icons.album_rounded;
+      case LibraryMode.folders:
+        return Icons.folder_rounded;
       case LibraryMode.recent:
         return Icons.history_rounded;
       case LibraryMode.favorites:
         return Icons.favorite_rounded;
-      case LibraryMode.lyrics:
-        return Icons.lyrics_rounded;
     }
   }
 }
@@ -106,12 +115,11 @@ class _HomeShellState extends State<HomeShell> {
   bool _searchOpen = false;
   bool _playerOpen = false;
   bool _loadingLibrary = true;
-  bool _hasAllFilesAccess = true;
   String? _libraryError;
   String? _lastRecentTrackId;
   Timer? _saveTimer;
   List<MusicTrack> _tracks = const [];
-  LibraryMode _libraryMode = LibraryMode.all;
+  LibraryMode _libraryMode = LibraryMode.songs;
   final Set<String> _favoriteIds = <String>{};
   final List<String> _recentIds = <String>[];
 
@@ -160,15 +168,13 @@ class _HomeShellState extends State<HomeShell> {
 
     try {
       final granted = await MusicLibrary.requestAudioPermission();
-      final allFiles = await MusicLibrary.hasAllFilesAccess();
       if (!mounted) {
         return;
       }
       if (!granted) {
         setState(() {
           _loadingLibrary = false;
-          _hasAllFilesAccess = allFiles;
-          _libraryError = '需要读取音频权限才能扫描 Music 文件夹';
+          _libraryError = '需要读取音频权限才能访问 Music 文件夹';
         });
         return;
       }
@@ -180,7 +186,6 @@ class _HomeShellState extends State<HomeShell> {
       _player.setQueue(tracks);
       setState(() {
         _tracks = tracks;
-        _hasAllFilesAccess = allFiles;
         _loadingLibrary = false;
       });
     } catch (error) {
@@ -214,7 +219,7 @@ class _HomeShellState extends State<HomeShell> {
       _searchOpen = false;
       _pageIndex = index;
       if (index == 1) {
-        _libraryMode = LibraryMode.all;
+        _libraryMode = LibraryMode.songs;
       }
     });
     _pageController.animateToPage(
@@ -275,14 +280,6 @@ class _HomeShellState extends State<HomeShell> {
     );
   }
 
-  Future<void> _openAllFilesSettings() async {
-    await MusicLibrary.openAllFilesSettings();
-    final access = await MusicLibrary.hasAllFilesAccess();
-    if (mounted) {
-      setState(() => _hasAllFilesAccess = access);
-    }
-  }
-
   List<MusicTrack> get _recentTracks {
     final byId = {for (final track in _tracks) track.id: track};
     return [
@@ -295,18 +292,63 @@ class _HomeShellState extends State<HomeShell> {
     return _tracks.where((track) => _favoriteIds.contains(track.id)).toList();
   }
 
+  int get _artistCount => _tracks.map((track) => track.artist).toSet().length;
+
+  int get _albumCount =>
+      _tracks.map((track) => track.displayAlbum).toSet().length;
+
+  int get _folderCount =>
+      _tracks.map((track) => track.folderName).toSet().length;
+
   List<MusicTrack> _tracksForMode(LibraryMode mode) {
     switch (mode) {
-      case LibraryMode.all:
+      case LibraryMode.songs:
         return _tracks;
+      case LibraryMode.artists:
+        return List<MusicTrack>.of(_tracks)
+          ..sort((a, b) {
+            final byArtist = a.artist.toLowerCase().compareTo(b.artist.toLowerCase());
+            return byArtist == 0
+                ? a.title.toLowerCase().compareTo(b.title.toLowerCase())
+                : byArtist;
+          });
+      case LibraryMode.albums:
+        return List<MusicTrack>.of(_tracks)
+          ..sort((a, b) {
+            final byAlbum = a.displayAlbum.toLowerCase().compareTo(b.displayAlbum.toLowerCase());
+            return byAlbum == 0
+                ? a.title.toLowerCase().compareTo(b.title.toLowerCase())
+                : byAlbum;
+          });
+      case LibraryMode.folders:
+        return List<MusicTrack>.of(_tracks)
+          ..sort((a, b) {
+            final byFolder = a.folderName.toLowerCase().compareTo(b.folderName.toLowerCase());
+            return byFolder == 0
+                ? a.title.toLowerCase().compareTo(b.title.toLowerCase())
+                : byFolder;
+          });
       case LibraryMode.recent:
         return _recentTracks;
       case LibraryMode.favorites:
         return _favoriteTracks;
-      case LibraryMode.lyrics:
-        return _tracks
-            .where((track) => track.lyricsPath != null && track.lyricsPath!.isNotEmpty)
-            .toList();
+    }
+  }
+
+  void _handleBackGesture(bool didPop) {
+    if (didPop) {
+      return;
+    }
+    if (_searchOpen) {
+      setState(() => _searchOpen = false);
+      return;
+    }
+    if (_playerOpen) {
+      setState(() => _playerOpen = false);
+      return;
+    }
+    if (_pageIndex != 0) {
+      _selectPage(0);
     }
   }
 
@@ -314,9 +356,13 @@ class _HomeShellState extends State<HomeShell> {
   Widget build(BuildContext context) {
     final current = _player.currentTrack ?? DemoTracks.placeholder;
     final bottomInset = MediaQuery.of(context).padding.bottom;
+    final reservedBottom = 78 + 64 + bottomInset;
 
-    return Scaffold(
-      body: Stack(
+    return PopScope(
+      canPop: !_searchOpen && !_playerOpen && _pageIndex == 0,
+      onPopInvokedWithResult: (didPop, result) => _handleBackGesture(didPop),
+      child: Scaffold(
+        body: Stack(
         children: [
           Column(
             children: [
@@ -338,24 +384,27 @@ class _HomeShellState extends State<HomeShell> {
                       progress: _player.progress,
                       isLoading: _loadingLibrary,
                       error: _libraryError,
-                      hasAllFilesAccess: _hasAllFilesAccess,
-                      onRefresh: _loadLibrary,
+                      artistCount: _artistCount,
+                      albumCount: _albumCount,
+                      folderCount: _folderCount,
+                      favoriteCount: _favoriteTracks.length,
                       onTrackSelected: (track) => _selectTrack(track),
                       onOpenLibrary: _openLibrary,
                     ),
                     LibraryPage(
                       mode: _libraryMode,
                       tracks: _tracksForMode(_libraryMode),
-                      allCount: _tracks.length,
+                      songCount: _tracks.length,
+                      artistCount: _artistCount,
+                      albumCount: _albumCount,
+                      folderCount: _folderCount,
                       recentCount: _recentTracks.length,
                       favoriteCount: _favoriteTracks.length,
-                      lyricsCount: _tracksForMode(LibraryMode.lyrics).length,
                       isLoading: _loadingLibrary,
                       error: _libraryError,
                       favoriteIds: _favoriteIds,
                       currentTrackId: _player.currentTrack?.id,
                       onModeChanged: (mode) => setState(() => _libraryMode = mode),
-                      onRefresh: _loadLibrary,
                       onTrackSelected: (track) => _selectTrack(
                         track,
                         queue: _tracksForMode(_libraryMode),
@@ -364,13 +413,12 @@ class _HomeShellState extends State<HomeShell> {
                     ),
                     ProfilePage(
                       trackCount: _tracks.length,
+                      artistCount: _artistCount,
+                      albumCount: _albumCount,
+                      folderCount: _folderCount,
                       favoriteCount: _favoriteTracks.length,
-                      lyricsCount: _tracksForMode(LibraryMode.lyrics).length,
                       recentCount: _recentTracks.length,
                       currentTrack: current,
-                      hasAllFilesAccess: _hasAllFilesAccess,
-                      onOpenAllFilesSettings: _openAllFilesSettings,
-                      onRefresh: _loadLibrary,
                     ),
                   ],
                 ),
@@ -396,6 +444,7 @@ class _HomeShellState extends State<HomeShell> {
             controller: _searchController,
             tracks: _tracks,
             favoriteIds: _favoriteIds,
+            bottomReserved: reservedBottom,
             onClose: () => setState(() => _searchOpen = false),
             onTrackSelected: (track) {
               _selectTrack(track);
@@ -412,6 +461,7 @@ class _HomeShellState extends State<HomeShell> {
               onClosed: () => setState(() => _playerOpen = false),
             ),
         ],
+        ),
       ),
     );
   }
@@ -426,8 +476,10 @@ class HomePage extends StatelessWidget {
     required this.progress,
     required this.isLoading,
     required this.error,
-    required this.hasAllFilesAccess,
-    required this.onRefresh,
+    required this.artistCount,
+    required this.albumCount,
+    required this.folderCount,
+    required this.favoriteCount,
     required this.onTrackSelected,
     required this.onOpenLibrary,
     super.key,
@@ -440,8 +492,10 @@ class HomePage extends StatelessWidget {
   final double progress;
   final bool isLoading;
   final String? error;
-  final bool hasAllFilesAccess;
-  final VoidCallback onRefresh;
+  final int artistCount;
+  final int albumCount;
+  final int folderCount;
+  final int favoriteCount;
   final ValueChanged<MusicTrack> onTrackSelected;
   final ValueChanged<LibraryMode> onOpenLibrary;
 
@@ -449,7 +503,6 @@ class HomePage extends StatelessWidget {
   Widget build(BuildContext context) {
     final top = MediaQuery.of(context).padding.top;
     final visibleTracks = recentTracks.isEmpty ? tracks.take(8).toList() : recentTracks.take(8).toList();
-    final lyricsCount = tracks.where((track) => track.lyricsPath != null && track.lyricsPath!.isNotEmpty).length;
 
     return ColoredBox(
       color: LisnColors.ink,
@@ -534,9 +587,9 @@ class HomePage extends StatelessWidget {
                           child: TileButton(
                             color: LisnColors.amber,
                             foreground: LisnColors.ink,
-                            icon: Icons.sync_rounded,
-                            label: '扫描',
-                            onTap: onRefresh,
+                            icon: Icons.favorite_rounded,
+                            label: '收藏 $favoriteCount',
+                            onTap: () => onOpenLibrary(LibraryMode.favorites),
                           ),
                         ),
                       ],
@@ -554,26 +607,26 @@ class HomePage extends StatelessWidget {
                   Expanded(
                     child: TileButton(
                       color: LisnColors.panelAlt,
-                      icon: Icons.history_rounded,
-                      label: '最近',
-                      onTap: () => onOpenLibrary(LibraryMode.recent),
+                      icon: Icons.library_music_rounded,
+                      label: '歌曲',
+                      onTap: () => onOpenLibrary(LibraryMode.songs),
                     ),
                   ),
                   Expanded(
                     child: TileButton(
                       color: LisnColors.violet,
-                      icon: Icons.library_music_rounded,
-                      label: '本地',
-                      onTap: () => onOpenLibrary(LibraryMode.all),
+                      icon: Icons.mic_external_on_rounded,
+                      label: '艺术家 $artistCount',
+                      onTap: () => onOpenLibrary(LibraryMode.artists),
                     ),
                   ),
                   Expanded(
                     child: TileButton(
                       color: LisnColors.lime,
                       foreground: LisnColors.ink,
-                      icon: Icons.lyrics_rounded,
-                      label: '$lyricsCount 词',
-                      onTap: () => onOpenLibrary(LibraryMode.lyrics),
+                      icon: Icons.album_rounded,
+                      label: '专辑 $albumCount',
+                      onTap: () => onOpenLibrary(LibraryMode.albums),
                     ),
                   ),
                 ],
@@ -581,17 +634,34 @@ class HomePage extends StatelessWidget {
             ),
           ),
           SliverToBoxAdapter(
-            child: StatusStrip(
-              isLoading: isLoading,
-              error: error,
-              trackCount: tracks.length,
-              hasAllFilesAccess: hasAllFilesAccess,
+            child: SizedBox(
+              height: 108,
+              child: Row(
+                children: [
+                  Expanded(
+                    child: TileButton(
+                      color: LisnColors.teal,
+                      icon: Icons.folder_rounded,
+                      label: '文件夹 $folderCount',
+                      onTap: () => onOpenLibrary(LibraryMode.folders),
+                    ),
+                  ),
+                  Expanded(
+                    child: TileButton(
+                      color: LisnColors.orange,
+                      icon: Icons.history_rounded,
+                      label: '最近',
+                      onTap: () => onOpenLibrary(LibraryMode.recent),
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
           if (visibleTracks.isEmpty && !isLoading)
             SliverFillRemaining(
               hasScrollBody: false,
-              child: EmptyLibrary(onRefresh: onRefresh, error: error),
+              child: EmptyLibrary(error: error),
             )
           else
             SliverList(
@@ -620,16 +690,17 @@ class LibraryPage extends StatelessWidget {
   const LibraryPage({
     required this.mode,
     required this.tracks,
-    required this.allCount,
+    required this.songCount,
+    required this.artistCount,
+    required this.albumCount,
+    required this.folderCount,
     required this.recentCount,
     required this.favoriteCount,
-    required this.lyricsCount,
     required this.isLoading,
     required this.error,
     required this.favoriteIds,
     required this.currentTrackId,
     required this.onModeChanged,
-    required this.onRefresh,
     required this.onTrackSelected,
     required this.onToggleFavorite,
     super.key,
@@ -637,16 +708,17 @@ class LibraryPage extends StatelessWidget {
 
   final LibraryMode mode;
   final List<MusicTrack> tracks;
-  final int allCount;
+  final int songCount;
+  final int artistCount;
+  final int albumCount;
+  final int folderCount;
   final int recentCount;
   final int favoriteCount;
-  final int lyricsCount;
   final bool isLoading;
   final String? error;
   final Set<String> favoriteIds;
   final String? currentTrackId;
   final ValueChanged<LibraryMode> onModeChanged;
-  final VoidCallback onRefresh;
   final ValueChanged<MusicTrack> onTrackSelected;
   final ValueChanged<MusicTrack> onToggleFavorite;
 
@@ -660,98 +732,102 @@ class LibraryPage extends StatelessWidget {
           SliverToBoxAdapter(
             child: Padding(
               padding: EdgeInsets.only(top: top),
-              child: SizedBox(
-                height: 132,
-                child: Row(
-                  children: [
-                    Expanded(
-                      flex: 2,
-                      child: TileBlock(
-                        color: LisnColors.panel,
-                        child: Padding(
-                          padding: const EdgeInsets.all(18),
-                          child: Align(
-                            alignment: Alignment.bottomLeft,
-                            child: Text(
-                              mode.label,
-                              style: const TextStyle(
-                                fontSize: 40,
-                                fontWeight: FontWeight.w900,
-                                letterSpacing: 0,
-                              ),
-                            ),
-                          ),
+              child: TileBlock(
+                color: LisnColors.panel,
+                child: SizedBox(
+                  height: 116,
+                  child: Padding(
+                    padding: const EdgeInsets.all(18),
+                    child: Align(
+                      alignment: Alignment.bottomLeft,
+                      child: Text(
+                        mode.label,
+                        style: const TextStyle(
+                          fontSize: 40,
+                          fontWeight: FontWeight.w900,
+                          letterSpacing: 0,
                         ),
                       ),
                     ),
-                    Expanded(
-                      child: TileButton(
-                        color: LisnColors.cyan,
-                        icon: Icons.refresh_rounded,
-                        label: '刷新',
-                        onTap: onRefresh,
-                      ),
-                    ),
-                  ],
+                  ),
                 ),
               ),
             ),
           ),
           SliverToBoxAdapter(
             child: SizedBox(
-              height: 82,
-              child: Row(
+              height: 164,
+              child: Column(
                 children: [
                   Expanded(
-                    child: ModeTile(
-                      mode: LibraryMode.all,
-                      selected: mode == LibraryMode.all,
-                      count: allCount,
-                      onTap: onModeChanged,
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: ModeTile(
+                            mode: LibraryMode.songs,
+                            selected: mode == LibraryMode.songs,
+                            count: songCount,
+                            onTap: onModeChanged,
+                          ),
+                        ),
+                        Expanded(
+                          child: ModeTile(
+                            mode: LibraryMode.artists,
+                            selected: mode == LibraryMode.artists,
+                            count: artistCount,
+                            onTap: onModeChanged,
+                          ),
+                        ),
+                        Expanded(
+                          child: ModeTile(
+                            mode: LibraryMode.albums,
+                            selected: mode == LibraryMode.albums,
+                            count: albumCount,
+                            onTap: onModeChanged,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                   Expanded(
-                    child: ModeTile(
-                      mode: LibraryMode.recent,
-                      selected: mode == LibraryMode.recent,
-                      count: recentCount,
-                      onTap: onModeChanged,
-                    ),
-                  ),
-                  Expanded(
-                    child: ModeTile(
-                      mode: LibraryMode.favorites,
-                      selected: mode == LibraryMode.favorites,
-                      count: favoriteCount,
-                      onTap: onModeChanged,
-                    ),
-                  ),
-                  Expanded(
-                    child: ModeTile(
-                      mode: LibraryMode.lyrics,
-                      selected: mode == LibraryMode.lyrics,
-                      count: lyricsCount,
-                      onTap: onModeChanged,
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: ModeTile(
+                            mode: LibraryMode.folders,
+                            selected: mode == LibraryMode.folders,
+                            count: folderCount,
+                            onTap: onModeChanged,
+                          ),
+                        ),
+                        Expanded(
+                          child: ModeTile(
+                            mode: LibraryMode.recent,
+                            selected: mode == LibraryMode.recent,
+                            count: recentCount,
+                            onTap: onModeChanged,
+                          ),
+                        ),
+                        Expanded(
+                          child: ModeTile(
+                            mode: LibraryMode.favorites,
+                            selected: mode == LibraryMode.favorites,
+                            count: favoriteCount,
+                            onTap: onModeChanged,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
                 ],
               ),
             ),
           ),
-          SliverToBoxAdapter(
-            child: StatusStrip(
-              isLoading: isLoading,
-              error: error,
-              trackCount: allCount,
-              hasAllFilesAccess: true,
-            ),
-          ),
           if (tracks.isEmpty && !isLoading)
             SliverFillRemaining(
               hasScrollBody: false,
               child: EmptyLibrary(
-                onRefresh: onRefresh,
-                error: mode == LibraryMode.all ? error : '${mode.label}列表为空',
+                error: mode == LibraryMode.songs ? error : '${mode.label}列表为空',
               ),
             )
           else
@@ -764,6 +840,7 @@ class LibraryPage extends StatelessWidget {
                     accent: LisnPalette.byIndex(index),
                     current: track.id == currentTrackId,
                     isFavorite: favoriteIds.contains(track.id),
+                    secondaryText: _secondaryForMode(track),
                     onTap: () => onTrackSelected(track),
                     onToggleFavorite: () => onToggleFavorite(track),
                   );
@@ -775,29 +852,42 @@ class LibraryPage extends StatelessWidget {
       ),
     );
   }
+
+  String _secondaryForMode(MusicTrack track) {
+    switch (mode) {
+      case LibraryMode.artists:
+        return '${track.artist} · ${track.displayAlbum}';
+      case LibraryMode.albums:
+        return '${track.displayAlbum} · ${track.artist}';
+      case LibraryMode.folders:
+        return '${track.folderName} · ${track.artist}';
+      case LibraryMode.songs:
+      case LibraryMode.recent:
+      case LibraryMode.favorites:
+        return track.artist;
+    }
+  }
 }
 
 class ProfilePage extends StatelessWidget {
   const ProfilePage({
     required this.trackCount,
+    required this.artistCount,
+    required this.albumCount,
+    required this.folderCount,
     required this.favoriteCount,
-    required this.lyricsCount,
     required this.recentCount,
     required this.currentTrack,
-    required this.hasAllFilesAccess,
-    required this.onOpenAllFilesSettings,
-    required this.onRefresh,
     super.key,
   });
 
   final int trackCount;
+  final int artistCount;
+  final int albumCount;
+  final int folderCount;
   final int favoriteCount;
-  final int lyricsCount;
   final int recentCount;
   final MusicTrack currentTrack;
-  final bool hasAllFilesAccess;
-  final VoidCallback onOpenAllFilesSettings;
-  final VoidCallback onRefresh;
 
   @override
   Widget build(BuildContext context) {
@@ -848,8 +938,8 @@ class ProfilePage extends StatelessWidget {
                   child: TileBlock(
                     color: LisnColors.amber,
                     child: StatTile(
-                      label: '收藏',
-                      value: '$favoriteCount',
+                      label: '艺术家',
+                      value: '$artistCount',
                       darkText: true,
                     ),
                   ),
@@ -857,13 +947,13 @@ class ProfilePage extends StatelessWidget {
                 Expanded(
                   child: TileBlock(
                     color: LisnColors.violet,
-                    child: StatTile(label: '歌词', value: '$lyricsCount'),
+                    child: StatTile(label: '专辑', value: '$albumCount'),
                   ),
                 ),
                 Expanded(
                   child: TileBlock(
                     color: LisnColors.panelAlt,
-                    child: StatTile(label: '最近', value: '$recentCount'),
+                    child: StatTile(label: '文件夹', value: '$folderCount'),
                   ),
                 ),
               ],
@@ -908,14 +998,44 @@ class ProfilePage extends StatelessWidget {
                   ),
                 ),
                 Expanded(
-                  child: TileButton(
-                    color: hasAllFilesAccess ? LisnColors.lime : LisnColors.orange,
-                    foreground: hasAllFilesAccess ? LisnColors.ink : LisnColors.text,
-                    icon: hasAllFilesAccess
-                        ? Icons.folder_open_rounded
-                        : Icons.admin_panel_settings_rounded,
-                    label: hasAllFilesAccess ? '歌词权限' : '授权歌词',
-                    onTap: hasAllFilesAccess ? onRefresh : onOpenAllFilesSettings,
+                  child: TileBlock(
+                    color: LisnColors.lime,
+                    child: StatTile(
+                      label: '收藏',
+                      value: '$favoriteCount',
+                      darkText: true,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          SizedBox(
+            height: 96,
+            child: Row(
+              children: [
+                Expanded(
+                  child: TileBlock(
+                    color: LisnColors.teal,
+                    child: StatTile(label: '最近', value: '$recentCount'),
+                  ),
+                ),
+                const Expanded(
+                  child: TileBlock(
+                    color: LisnColors.panel,
+                    child: Padding(
+                      padding: EdgeInsets.all(14),
+                      child: Align(
+                        alignment: Alignment.bottomLeft,
+                        child: Text(
+                          '本地音乐',
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                      ),
+                    ),
                   ),
                 ),
               ],
@@ -933,6 +1053,7 @@ class SearchPanel extends StatefulWidget {
     required this.controller,
     required this.tracks,
     required this.favoriteIds,
+    required this.bottomReserved,
     required this.onClose,
     required this.onTrackSelected,
     required this.onToggleFavorite,
@@ -943,6 +1064,7 @@ class SearchPanel extends StatefulWidget {
   final TextEditingController controller;
   final List<MusicTrack> tracks;
   final Set<String> favoriteIds;
+  final double bottomReserved;
   final VoidCallback onClose;
   final ValueChanged<MusicTrack> onTrackSelected;
   final ValueChanged<MusicTrack> onToggleFavorite;
@@ -978,7 +1100,9 @@ class _SearchPanelState extends State<SearchPanel> {
   @override
   Widget build(BuildContext context) {
     final topInset = MediaQuery.of(context).padding.top;
-    final height = math.min(MediaQuery.of(context).size.height * 0.72, 580.0);
+    final availableHeight =
+        math.max(220.0, MediaQuery.of(context).size.height - widget.bottomReserved);
+    final height = math.min(availableHeight, 620.0);
     final query = widget.controller.text.trim().toLowerCase();
     final results = query.isEmpty
         ? widget.tracks.take(12).toList()
@@ -992,21 +1116,24 @@ class _SearchPanelState extends State<SearchPanel> {
       ignoring: !widget.open,
       child: Stack(
         children: [
-          AnimatedOpacity(
-            opacity: widget.open ? 0.62 : 0,
-            duration: const Duration(milliseconds: 220),
-            child: GestureDetector(
-              onTap: widget.onClose,
-              child: const ColoredBox(color: Colors.black),
+          Positioned.fill(
+            bottom: widget.bottomReserved,
+            child: AnimatedOpacity(
+              opacity: widget.open ? 0.62 : 0,
+              duration: const Duration(milliseconds: 220),
+              child: GestureDetector(
+                onTap: widget.onClose,
+                child: const ColoredBox(color: Colors.black),
+              ),
             ),
           ),
           AnimatedPositioned(
             duration: const Duration(milliseconds: 330),
             curve: Curves.easeOutCubic,
-            top: widget.open ? 0 : -height - topInset,
+            top: widget.open ? 0 : -height,
             left: 0,
             right: 0,
-            height: height + topInset,
+            height: height,
             child: Material(
               color: LisnColors.panel,
               child: Column(
@@ -1313,6 +1440,7 @@ class _FullPlayerOverlayState extends State<FullPlayerOverlay>
     with SingleTickerProviderStateMixin {
   late final AnimationController _controller;
   bool _closing = false;
+  bool _showLyrics = false;
 
   @override
   void initState() {
@@ -1368,9 +1496,8 @@ class _FullPlayerOverlayState extends State<FullPlayerOverlay>
           final topBand = topInset + 54;
           final bottomStack = 84 + 92 + 82 + bottomInset;
           final artTop = topBand;
-          final artBottom = bottomStack + 150;
+          final artBottom = bottomStack + 92;
           final artHeight = math.max(150.0, size.height - artTop - artBottom);
-          final lyricsHeight = math.min(148.0, math.max(96.0, size.height * 0.18));
 
           return Stack(
             children: [
@@ -1406,6 +1533,13 @@ class _FullPlayerOverlayState extends State<FullPlayerOverlay>
                         ),
                       ),
                       SquareIconButton(
+                        icon: _showLyrics
+                            ? Icons.image_rounded
+                            : Icons.lyrics_rounded,
+                        label: _showLyrics ? '显示封面' : '显示歌词',
+                        onTap: () => setState(() => _showLyrics = !_showLyrics),
+                      ),
+                      SquareIconButton(
                         icon: widget.isFavorite
                             ? Icons.favorite_rounded
                             : Icons.favorite_border_rounded,
@@ -1429,14 +1563,20 @@ class _FullPlayerOverlayState extends State<FullPlayerOverlay>
                   },
                   child: Transform.translate(
                     offset: Offset(-size.width * (1 - cover), 0),
-                    child: PlayerCover(track: widget.track),
+                    child: PlayerVisual(
+                      track: widget.track,
+                      lines: widget.player.lyrics,
+                      currentIndex: widget.player.currentLyricIndex(),
+                      error: widget.player.lyricsError,
+                      showLyrics: _showLyrics,
+                    ),
                   ),
                 ),
               ),
               Positioned(
                 left: 0,
                 right: 0,
-                bottom: bottomStack + lyricsHeight,
+                bottom: bottomStack,
                 height: 92,
                 child: GestureDetector(
                   onHorizontalDragEnd: (details) {
@@ -1447,21 +1587,6 @@ class _FullPlayerOverlayState extends State<FullPlayerOverlay>
                   child: Transform.translate(
                     offset: Offset(-size.width * (1 - title), 0),
                     child: PlayerTitleBand(track: widget.track),
-                  ),
-                ),
-              ),
-              Positioned(
-                left: 0,
-                right: 0,
-                bottom: bottomStack,
-                height: lyricsHeight,
-                child: Transform.translate(
-                  offset: Offset(-size.width * 0.42 * (1 - title), 0),
-                  child: LyricsBand(
-                    track: widget.track,
-                    lines: widget.player.lyrics,
-                    currentIndex: widget.player.currentLyricIndex(),
-                    error: widget.player.lyricsError,
                   ),
                 ),
               ),
@@ -1581,6 +1706,36 @@ class PlayerMosaicBackground extends StatelessWidget {
   }
 }
 
+class PlayerVisual extends StatelessWidget {
+  const PlayerVisual({
+    required this.track,
+    required this.lines,
+    required this.currentIndex,
+    required this.error,
+    required this.showLyrics,
+    super.key,
+  });
+
+  final MusicTrack track;
+  final List<LyricLine> lines;
+  final int currentIndex;
+  final String? error;
+  final bool showLyrics;
+
+  @override
+  Widget build(BuildContext context) {
+    if (showLyrics) {
+      return LyricsBand(
+        track: track,
+        lines: lines,
+        currentIndex: currentIndex,
+        error: error,
+      );
+    }
+    return PlayerCover(track: track);
+  }
+}
+
 class PlayerCover extends StatelessWidget {
   const PlayerCover({required this.track, super.key});
 
@@ -1593,45 +1748,125 @@ class PlayerCover extends StatelessWidget {
         ? 'L'
         : String.fromCharCodes(track.title.runes.take(1)).toUpperCase();
     final foreground = color.computeLuminance() > 0.45 ? LisnColors.ink : Colors.white;
-    return ColoredBox(
-      color: color,
-      child: Stack(
-        children: [
-          Positioned(
-            left: 18,
-            top: 18,
-            child: Icon(Icons.album_rounded, color: foreground, size: 54),
-          ),
-          Positioned(
-            right: -28,
-            bottom: -32,
-            child: Text(
-              letter,
-              style: TextStyle(
-                color: foreground.withOpacity(0.22),
-                fontSize: 220,
-                fontWeight: FontWeight.w900,
-                height: 0.8,
-                letterSpacing: 0,
+    return CoverArt(
+      track: track,
+      fit: BoxFit.cover,
+      fallback: ColoredBox(
+        color: color,
+        child: Stack(
+          children: [
+            Positioned(
+              left: 18,
+              top: 18,
+              child: Icon(Icons.album_rounded, color: foreground, size: 54),
+            ),
+            Positioned(
+              right: -28,
+              bottom: -32,
+              child: Text(
+                letter,
+                style: TextStyle(
+                  color: foreground.withOpacity(0.22),
+                  fontSize: 220,
+                  fontWeight: FontWeight.w900,
+                  height: 0.8,
+                  letterSpacing: 0,
+                ),
               ),
             ),
-          ),
-          Positioned(
-            left: 18,
-            right: 18,
-            bottom: 18,
-            child: Text(
-              track.fileName,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                color: foreground.withOpacity(0.82),
-                fontSize: 13,
-                fontWeight: FontWeight.w700,
+            Positioned(
+              left: 18,
+              right: 18,
+              bottom: 18,
+              child: Text(
+                track.fileName,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: foreground.withOpacity(0.82),
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                ),
               ),
             ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class CoverArt extends StatelessWidget {
+  CoverArt({
+    required this.track,
+    required this.fallback,
+    this.fit = BoxFit.cover,
+    super.key,
+  });
+
+  static final Map<String, Future<Uint8List?>> _cache = {};
+
+  final MusicTrack track;
+  final Widget fallback;
+  final BoxFit fit;
+
+  Future<Uint8List?> _load() {
+    return _cache.putIfAbsent(track.path, () => MusicLibrary.readCoverArt(track.path));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (track.path.isEmpty) {
+      return fallback;
+    }
+
+    return FutureBuilder<Uint8List?>(
+      future: _load(),
+      builder: (context, snapshot) {
+        final bytes = snapshot.data;
+        if (bytes == null || bytes.isEmpty) {
+          return fallback;
+        }
+        return Image.memory(
+          bytes,
+          fit: fit,
+          gaplessPlayback: true,
+          filterQuality: FilterQuality.medium,
+        );
+      },
+    );
+  }
+}
+
+class AlbumTile extends StatelessWidget {
+  const AlbumTile({
+    required this.track,
+    required this.size,
+    this.fallbackColor,
+    super.key,
+  });
+
+  final MusicTrack track;
+  final double size;
+  final Color? fallbackColor;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = fallbackColor ?? LisnPalette.fromText(track.title);
+    return SizedBox.square(
+      dimension: size,
+      child: CoverArt(
+        track: track,
+        fallback: ColoredBox(
+          color: color,
+          child: Icon(
+            Icons.album_rounded,
+            color: color.computeLuminance() > 0.45
+                ? LisnColors.ink
+                : Colors.white,
+            size: size * 0.42,
           ),
-        ],
+        ),
       ),
     );
   }
@@ -1731,14 +1966,14 @@ class LyricsBand extends StatelessWidget {
       );
     }
 
-    final start = math.max(0, currentIndex - 1);
-    final end = math.min(lines.length, currentIndex + 2);
+    final start = math.max(0, currentIndex - 3);
+    final end = math.min(lines.length, currentIndex + 4);
     final visible = lines.sublist(start, end);
 
     return ColoredBox(
       color: LisnColors.panel,
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+        padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 18),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -2105,76 +2340,12 @@ class StatTile extends StatelessWidget {
   }
 }
 
-class StatusStrip extends StatelessWidget {
-  const StatusStrip({
-    required this.isLoading,
-    required this.error,
-    required this.trackCount,
-    required this.hasAllFilesAccess,
-    super.key,
-  });
-
-  final bool isLoading;
-  final String? error;
-  final int trackCount;
-  final bool hasAllFilesAccess;
-
-  @override
-  Widget build(BuildContext context) {
-    final message = isLoading
-        ? '正在扫描 Music 文件夹'
-        : error != null
-            ? error!
-            : hasAllFilesAccess
-                ? '已读取 Music 文件夹及子文件夹，共 $trackCount 首'
-                : '已读取音频；如歌词缺失，请在“我的”中授权歌词文件访问';
-    return ColoredBox(
-      color: error == null ? LisnColors.panel : LisnColors.magenta,
-      child: SizedBox(
-        height: 44,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: Row(
-            children: [
-              if (isLoading)
-                const SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: LisnColors.text,
-                  ),
-                )
-              else
-                Icon(
-                  error == null ? Icons.folder_open_rounded : Icons.error_outline_rounded,
-                  size: 18,
-                ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  message,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class EmptyLibrary extends StatelessWidget {
   const EmptyLibrary({
-    required this.onRefresh,
     this.error,
     super.key,
   });
 
-  final VoidCallback onRefresh;
   final String? error;
 
   @override
@@ -2189,15 +2360,6 @@ class EmptyLibrary extends StatelessWidget {
           textAlign: TextAlign.center,
           style: const TextStyle(color: LisnColors.muted),
         ),
-        const SizedBox(height: 16),
-        SizedBox(
-          height: 48,
-          child: FilledButton.icon(
-            onPressed: onRefresh,
-            icon: const Icon(Icons.refresh_rounded),
-            label: const Text('重新扫描'),
-          ),
-        ),
       ],
     );
   }
@@ -2211,6 +2373,7 @@ class TrackTile extends StatelessWidget {
     required this.isFavorite,
     required this.onTap,
     required this.onToggleFavorite,
+    this.secondaryText,
     super.key,
   });
 
@@ -2220,6 +2383,7 @@ class TrackTile extends StatelessWidget {
   final bool isFavorite;
   final VoidCallback onTap;
   final VoidCallback? onToggleFavorite;
+  final String? secondaryText;
 
   @override
   Widget build(BuildContext context) {
@@ -2233,14 +2397,7 @@ class TrackTile extends StatelessWidget {
             children: [
               ColoredBox(
                 color: accent,
-                child: SizedBox(
-                  width: 74,
-                  height: 74,
-                  child: Icon(
-                    current ? Icons.graphic_eq_rounded : Icons.music_note_rounded,
-                    color: Colors.white,
-                  ),
-                ),
+                child: AlbumTile(track: track, size: 74, fallbackColor: accent),
               ),
               Expanded(
                 child: Padding(
@@ -2259,25 +2416,14 @@ class TrackTile extends StatelessWidget {
                         ),
                       ),
                       const SizedBox(height: 4),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              track.artist,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                color: LisnColors.muted,
-                                fontSize: 12,
-                              ),
-                            ),
-                          ),
-                          if (track.lyricsPath != null && track.lyricsPath!.isNotEmpty)
-                            const Padding(
-                              padding: EdgeInsets.only(left: 8),
-                              child: Icon(Icons.lyrics_rounded, color: LisnColors.cyan, size: 16),
-                            ),
-                        ],
+                      Text(
+                        secondaryText ?? track.artist,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: LisnColors.muted,
+                          fontSize: 12,
+                        ),
                       ),
                     ],
                   ),
@@ -2304,33 +2450,6 @@ class TrackTile extends StatelessWidget {
                 const SizedBox(width: 14),
             ],
           ),
-        ),
-      ),
-    );
-  }
-}
-
-class AlbumTile extends StatelessWidget {
-  const AlbumTile({
-    required this.track,
-    required this.size,
-    super.key,
-  });
-
-  final MusicTrack track;
-  final double size;
-
-  @override
-  Widget build(BuildContext context) {
-    final color = LisnPalette.fromText(track.title);
-    return ColoredBox(
-      color: color,
-      child: SizedBox.square(
-        dimension: size,
-        child: Icon(
-          Icons.album_rounded,
-          color: color.computeLuminance() > 0.45 ? LisnColors.ink : Colors.white,
-          size: size * 0.42,
         ),
       ),
     );

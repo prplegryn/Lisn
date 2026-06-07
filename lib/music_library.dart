@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/services.dart';
 
@@ -42,6 +43,27 @@ class MusicTrack {
   String get fileName {
     final normalized = path.replaceAll('\\', '/');
     return normalized.split('/').last;
+  }
+
+  String get folderName {
+    if (path.isEmpty) {
+      return 'Music';
+    }
+    final normalized = path.replaceAll('\\', '/');
+    final parts = normalized.split('/');
+    if (parts.length < 2) {
+      return 'Music';
+    }
+    final folder = parts[parts.length - 2].trim();
+    return folder.isEmpty ? 'Music' : folder;
+  }
+
+  String get displayAlbum {
+    final value = album?.trim();
+    if (value == null || value.isEmpty) {
+      return '未知专辑';
+    }
+    return value;
   }
 
   String get durationLabel {
@@ -164,28 +186,23 @@ class MusicLibrary {
     return _readLyricsFallback(path);
   }
 
-  static Future<bool> hasAllFilesAccess() async {
-    if (!Platform.isAndroid) {
-      return true;
+  static Future<Uint8List?> readCoverArt(String path) async {
+    if (path.trim().isEmpty) {
+      return null;
     }
 
-    try {
-      return await _channel.invokeMethod<bool>('hasAllFilesAccess') ?? false;
-    } on MissingPluginException {
-      return true;
+    if (Platform.isAndroid) {
+      try {
+        return await _channel.invokeMethod<Uint8List>(
+          'readCoverArt',
+          {'path': path},
+        );
+      } on MissingPluginException {
+        return null;
+      }
     }
-  }
 
-  static Future<void> openAllFilesSettings() async {
-    if (!Platform.isAndroid) {
-      return;
-    }
-
-    try {
-      await _channel.invokeMethod<void>('openAllFilesSettings');
-    } on MissingPluginException {
-      return;
-    }
+    return null;
   }
 
   static Future<UserLibraryState> loadUserState() async {

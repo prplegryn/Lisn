@@ -1,7 +1,6 @@
 package com.prplegryn.lisn;
 
 import android.Manifest;
-import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.media.AudioAttributes;
@@ -9,8 +8,6 @@ import android.media.MediaMetadataRetriever;
 import android.media.MediaPlayer;
 import android.os.Build;
 import android.os.Environment;
-import android.net.Uri;
-import android.provider.Settings;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -63,6 +60,12 @@ public class MainActivity extends FlutterActivity {
             ".wav",
             ".wma"
     ));
+    private static final Set<String> IMAGE_EXTENSIONS = new HashSet<>(Arrays.asList(
+            ".jpg",
+            ".jpeg",
+            ".png",
+            ".webp"
+    ));
 
     private MethodChannel.Result pendingPermissionResult;
     private EventChannel.EventSink playerEventSink;
@@ -110,12 +113,8 @@ public class MainActivity extends FlutterActivity {
             readLyrics(call, result);
             return;
         }
-        if ("hasAllFilesAccess".equals(call.method)) {
-            result.success(hasAllFilesAccess());
-            return;
-        }
-        if ("openAllFilesSettings".equals(call.method)) {
-            openAllFilesSettings(result);
+        if ("readCoverArt".equals(call.method)) {
+            readCoverArt(call, result);
             return;
         }
         if ("loadUserState".equals(call.method)) {
@@ -213,6 +212,47 @@ public class MainActivity extends FlutterActivity {
         }
     }
 
+    private void readCoverArt(MethodCall call, MethodChannel.Result result) {
+        String path = call.argument("path");
+        if (path == null || path.trim().isEmpty()) {
+            result.success(null);
+            return;
+        }
+
+        File file = new File(path);
+        if (!file.exists() || !file.isFile()) {
+            result.success(null);
+            return;
+        }
+
+        MediaMetadataRetriever retriever = new MediaMetadataRetriever();
+        try {
+            retriever.setDataSource(file.getAbsolutePath());
+            byte[] picture = retriever.getEmbeddedPicture();
+            if (picture != null && picture.length > 0) {
+                result.success(picture);
+                return;
+            }
+        } catch (Exception ignored) {
+        } finally {
+            try {
+                retriever.release();
+            } catch (Exception ignored) {
+            }
+        }
+
+        File coverFile = findCoverImageFile(file);
+        if (coverFile == null) {
+            result.success(null);
+            return;
+        }
+        try {
+            result.success(readAllBytes(coverFile));
+        } catch (IOException ignored) {
+            result.success(null);
+        }
+    }
+
     private boolean hasAudioPermission() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
             return true;
@@ -225,29 +265,6 @@ public class MainActivity extends FlutterActivity {
             return Manifest.permission.READ_MEDIA_AUDIO;
         }
         return Manifest.permission.READ_EXTERNAL_STORAGE;
-    }
-
-    private boolean hasAllFilesAccess() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-            return true;
-        }
-        return Environment.isExternalStorageManager();
-    }
-
-    private void openAllFilesSettings(MethodChannel.Result result) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
-            result.success(null);
-            return;
-        }
-
-        Intent intent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
-        intent.setData(Uri.parse("package:" + getPackageName()));
-        try {
-            startActivity(intent);
-        } catch (Exception ignored) {
-            startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
-        }
-        result.success(null);
     }
 
     private void loadUserState(MethodChannel.Result result) {
@@ -383,6 +400,43 @@ public class MainActivity extends FlutterActivity {
         return best;
     }
 
+    private File findCoverImageFile(File audioFile) {
+        File parent = audioFile.getParentFile();
+        if (parent == null || !parent.exists() || !parent.isDirectory()) {
+            return null;
+        }
+
+        File[] children = parent.listFiles();
+        if (children == null) {
+            return null;
+        }
+
+        String base = titleFromName(audioFile.getName()).toLowerCase(Locale.US);
+        File fallback = null;
+        for (File child : children) {
+            if (!child.isFile()) {
+                continue;
+            }
+            String name = child.getName().toLowerCase(Locale.US);
+            String extension = extensionOf(name);
+            if (!IMAGE_EXTENSIONS.contains(extension)) {
+                continue;
+            }
+            String imageBase = name.substring(0, name.length() - extension.length());
+            if (imageBase.equals(base)) {
+                return child;
+            }
+            if (fallback == null
+                    && (imageBase.equals("cover")
+                    || imageBase.equals("folder")
+                    || imageBase.equals("front")
+                    || imageBase.equals("album"))) {
+                fallback = child;
+            }
+        }
+        return fallback;
+    }
+
     private boolean isLyricsSuffix(String suffix) {
         if (suffix.isEmpty()) {
             return true;
@@ -407,6 +461,14 @@ public class MainActivity extends FlutterActivity {
             return fileName.substring(0, dotIndex);
         }
         return fileName;
+    }
+
+    private String extensionOf(String fileName) {
+        int dotIndex = fileName.lastIndexOf('.');
+        if (dotIndex < 0) {
+            return "";
+        }
+        return fileName.substring(dotIndex);
     }
 
     private List<String> stringListFromArgument(Object value) {
