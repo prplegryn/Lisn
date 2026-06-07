@@ -11,8 +11,8 @@ void main() {
     const SystemUiOverlayStyle(
       statusBarColor: Colors.transparent,
       statusBarIconBrightness: Brightness.light,
-      navigationBarColor: LisnColors.ink,
-      navigationBarIconBrightness: Brightness.light,
+      systemNavigationBarColor: LisnColors.ink,
+      systemNavigationBarIconBrightness: Brightness.light,
     ),
   );
   runApp(const LisnApp());
