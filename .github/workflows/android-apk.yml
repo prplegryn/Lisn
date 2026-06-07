@@ -1,0 +1,57 @@
+name: Android APK
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    name: Build release APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Hydrate Gradle wrapper
+        run: |
+          if [ ! -f android/gradlew ]; then
+            flutter create --platforms=android --project-name lisn --org com.prplegryn /tmp/lisn_template
+            cp /tmp/lisn_template/android/gradlew android/gradlew
+            cp /tmp/lisn_template/android/gradlew.bat android/gradlew.bat
+            cp -R /tmp/lisn_template/android/gradle android/gradle
+          fi
+          chmod +x android/gradlew
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Build APK
+        run: flutter build apk --release
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: lisn-release-apk
+          path: build/app/outputs/flutter-apk/*.apk
+          if-no-files-found: error
