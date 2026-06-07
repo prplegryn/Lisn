@@ -10,6 +10,7 @@ class MusicTrack {
     required this.artist,
     this.album,
     this.durationMs,
+    this.lyricsPath,
   });
 
   final String id;
@@ -18,11 +19,14 @@ class MusicTrack {
   final String artist;
   final String? album;
   final int? durationMs;
+  final String? lyricsPath;
 
   factory MusicTrack.fromMap(Map<dynamic, dynamic> map) {
     final path = (map['path'] as String?) ?? '';
     final title = (map['title'] as String?) ?? _titleFromPath(path);
     final artist = (map['artist'] as String?)?.trim();
+    final lyricsPath = (map['lyricsPath'] as String?)?.trim();
+    final duration = map['durationMs'];
 
     return MusicTrack(
       id: (map['id'] as String?) ?? path,
@@ -30,7 +34,8 @@ class MusicTrack {
       title: title.trim().isEmpty ? _titleFromPath(path) : title.trim(),
       artist: artist == null || artist.isEmpty ? '未知艺术家' : artist,
       album: (map['album'] as String?)?.trim(),
-      durationMs: map['durationMs'] is int ? map['durationMs'] as int : null,
+      durationMs: duration is num ? duration.round() : null,
+      lyricsPath: lyricsPath == null || lyricsPath.isEmpty ? null : lyricsPath,
     );
   }
 
@@ -61,6 +66,37 @@ class MusicTrack {
     final fileName = normalized.split('/').last;
     final dot = fileName.lastIndexOf('.');
     return dot > 0 ? fileName.substring(0, dot) : fileName;
+  }
+}
+
+class UserLibraryState {
+  const UserLibraryState({
+    required this.favoriteIds,
+    required this.recentIds,
+  });
+
+  final Set<String> favoriteIds;
+  final List<String> recentIds;
+
+  factory UserLibraryState.fromMap(Map<dynamic, dynamic>? map) {
+    return UserLibraryState(
+      favoriteIds: _stringSetFromList(map?['favoriteIds']),
+      recentIds: _stringListFromList(map?['recentIds']),
+    );
+  }
+
+  static Set<String> _stringSetFromList(dynamic value) {
+    return _stringListFromList(value).toSet();
+  }
+
+  static List<String> _stringListFromList(dynamic value) {
+    if (value is! List) {
+      return const [];
+    }
+    return [
+      for (final item in value)
+        if (item is String && item.isNotEmpty) item,
+    ];
   }
 }
 
@@ -112,6 +148,79 @@ class MusicLibrary {
     return _scanMusicFallback();
   }
 
+  static Future<String?> readLyrics(String path) async {
+    if (path.trim().isEmpty) {
+      return null;
+    }
+
+    if (Platform.isAndroid) {
+      try {
+        return await _channel.invokeMethod<String>('readLyrics', {'path': path});
+      } on MissingPluginException {
+        return _readLyricsFallback(path);
+      }
+    }
+
+    return _readLyricsFallback(path);
+  }
+
+  static Future<bool> hasAllFilesAccess() async {
+    if (!Platform.isAndroid) {
+      return true;
+    }
+
+    try {
+      return await _channel.invokeMethod<bool>('hasAllFilesAccess') ?? false;
+    } on MissingPluginException {
+      return true;
+    }
+  }
+
+  static Future<void> openAllFilesSettings() async {
+    if (!Platform.isAndroid) {
+      return;
+    }
+
+    try {
+      await _channel.invokeMethod<void>('openAllFilesSettings');
+    } on MissingPluginException {
+      return;
+    }
+  }
+
+  static Future<UserLibraryState> loadUserState() async {
+    if (Platform.isAndroid) {
+      try {
+        final result = await _channel.invokeMethod<dynamic>('loadUserState');
+        if (result is Map) {
+          return UserLibraryState.fromMap(result);
+        }
+      } on MissingPluginException {
+        return const UserLibraryState(favoriteIds: {}, recentIds: []);
+      }
+    }
+
+    return const UserLibraryState(favoriteIds: {}, recentIds: []);
+  }
+
+  static Future<void> saveUserState({
+    required Iterable<String> favoriteIds,
+    required Iterable<String> recentIds,
+  }) async {
+    if (!Platform.isAndroid) {
+      return;
+    }
+
+    try {
+      await _channel.invokeMethod<void>('saveUserState', {
+        'favoriteIds': favoriteIds.toList(),
+        'recentIds': recentIds.toList(),
+      });
+    } on MissingPluginException {
+      return;
+    }
+  }
+
   static List<MusicTrack> _tracksFromPlatformList(List<dynamic>? result) {
     final tracks = <MusicTrack>[];
     for (final item in result ?? const []) {
@@ -151,6 +260,7 @@ class MusicLibrary {
               path: entity.path,
               title: MusicTrack._titleFromPath(entity.path),
               artist: '未知艺术家',
+              lyricsPath: await _findFallbackLyrics(entity.path),
             ),
           );
         }
@@ -167,5 +277,66 @@ class MusicLibrary {
   static bool _isAudioPath(String path) {
     final lower = path.toLowerCase();
     return _audioExtensions.any(lower.endsWith);
+  }
+
+  static Future<String?> _readLyricsFallback(String path) async {
+    final file = File(path);
+    if (!await file.exists()) {
+      return null;
+    }
+    return file.readAsString();
+  }
+
+  static Future<String?> _findFallbackLyrics(String audioPath) async {
+    final file = File(audioPath);
+    final parent = file.parent;
+    if (!await parent.exists()) {
+      return null;
+    }
+    final audioName = file.uri.pathSegments.last;
+    final dot = audioName.lastIndexOf('.');
+    final base = dot > 0 ? audioName.substring(0, dot) : audioName;
+    final normalizedBase = base.toLowerCase();
+    final matches = <File>[];
+
+    await for (final entity in parent.list(followLinks: false)) {
+      if (entity is! File) {
+        continue;
+      }
+      final name = entity.uri.pathSegments.last.toLowerCase();
+      if (!name.endsWith('.lrc')) {
+        continue;
+      }
+      final lrcBase = name.substring(0, name.length - 4);
+      if (lrcBase == normalizedBase ||
+          (lrcBase.startsWith(normalizedBase) &&
+              _isLyricsSuffix(lrcBase.substring(normalizedBase.length)))) {
+        matches.add(entity);
+      }
+    }
+
+    if (matches.isEmpty) {
+      return null;
+    }
+    matches.sort((a, b) {
+      final length = a.path.length.compareTo(b.path.length);
+      if (length != 0) {
+        return length;
+      }
+      return a.path.toLowerCase().compareTo(b.path.toLowerCase());
+    });
+    return matches.first.path;
+  }
+
+  static bool _isLyricsSuffix(String suffix) {
+    if (suffix.isEmpty) {
+      return true;
+    }
+    return suffix.startsWith('.') ||
+        suffix.startsWith('-') ||
+        suffix.startsWith('_') ||
+        suffix.startsWith(' ') ||
+        suffix.startsWith('(') ||
+        suffix.startsWith('[');
   }
 }

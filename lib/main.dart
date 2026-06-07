@@ -1,9 +1,12 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'lyrics.dart';
 import 'music_library.dart';
+import 'playback_controller.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -30,7 +33,6 @@ class LisnApp extends StatelessWidget {
         useMaterial3: true,
         brightness: Brightness.dark,
         scaffoldBackgroundColor: LisnColors.ink,
-        fontFamily: 'Roboto',
         textTheme: ThemeData.dark().textTheme.apply(
               bodyColor: LisnColors.text,
               displayColor: LisnColors.text,
@@ -48,12 +50,44 @@ class LisnColors {
   static const Color panel = Color(0xFF15181C);
   static const Color panelAlt = Color(0xFF20242A);
   static const Color text = Color(0xFFF5F7FA);
-  static const Color muted = Color(0xFF9BA7B4);
+  static const Color muted = Color(0xFFA9B2BD);
   static const Color cyan = Color(0xFF00A8E8);
   static const Color magenta = Color(0xFFD81B60);
-  static const Color lime = Color(0xFF6DD400);
+  static const Color lime = Color(0xFF7BD88F);
   static const Color amber = Color(0xFFFFB000);
   static const Color violet = Color(0xFF7C4DFF);
+  static const Color orange = Color(0xFFFF5A3D);
+  static const Color teal = Color(0xFF00C2A8);
+}
+
+enum LibraryMode { all, recent, favorites, lyrics }
+
+extension LibraryModeLabel on LibraryMode {
+  String get label {
+    switch (this) {
+      case LibraryMode.all:
+        return '全部';
+      case LibraryMode.recent:
+        return '最近';
+      case LibraryMode.favorites:
+        return '收藏';
+      case LibraryMode.lyrics:
+        return '歌词';
+    }
+  }
+
+  IconData get icon {
+    switch (this) {
+      case LibraryMode.all:
+        return Icons.library_music_rounded;
+      case LibraryMode.recent:
+        return Icons.history_rounded;
+      case LibraryMode.favorites:
+        return Icons.favorite_rounded;
+      case LibraryMode.lyrics:
+        return Icons.lyrics_rounded;
+    }
+  }
 }
 
 class HomeShell extends StatefulWidget {
@@ -66,27 +100,56 @@ class HomeShell extends StatefulWidget {
 class _HomeShellState extends State<HomeShell> {
   final PageController _pageController = PageController();
   final TextEditingController _searchController = TextEditingController();
+  final PlaybackController _player = PlaybackController();
 
   int _pageIndex = 0;
   bool _searchOpen = false;
   bool _playerOpen = false;
-  bool _isPlaying = false;
   bool _loadingLibrary = true;
+  bool _hasAllFilesAccess = true;
   String? _libraryError;
+  String? _lastRecentTrackId;
+  Timer? _saveTimer;
   List<MusicTrack> _tracks = const [];
-  MusicTrack? _currentTrack;
+  LibraryMode _libraryMode = LibraryMode.all;
+  final Set<String> _favoriteIds = <String>{};
+  final List<String> _recentIds = <String>[];
 
   @override
   void initState() {
     super.initState();
+    _player.addListener(_onPlayerChanged);
+    _loadSavedState();
     _loadLibrary();
   }
 
   @override
   void dispose() {
+    _player.removeListener(_onPlayerChanged);
+    _player.dispose();
+    _saveTimer?.cancel();
+    MusicLibrary.saveUserState(
+      favoriteIds: _favoriteIds,
+      recentIds: _recentIds,
+    );
     _pageController.dispose();
     _searchController.dispose();
     super.dispose();
+  }
+
+  Future<void> _loadSavedState() async {
+    final state = await MusicLibrary.loadUserState();
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _favoriteIds
+        ..clear()
+        ..addAll(state.favoriteIds);
+      _recentIds
+        ..clear()
+        ..addAll(state.recentIds);
+    });
   }
 
   Future<void> _loadLibrary() async {
@@ -97,12 +160,14 @@ class _HomeShellState extends State<HomeShell> {
 
     try {
       final granted = await MusicLibrary.requestAudioPermission();
+      final allFiles = await MusicLibrary.hasAllFilesAccess();
       if (!mounted) {
         return;
       }
       if (!granted) {
         setState(() {
           _loadingLibrary = false;
+          _hasAllFilesAccess = allFiles;
           _libraryError = '需要读取音频权限才能扫描 Music 文件夹';
         });
         return;
@@ -112,9 +177,10 @@ class _HomeShellState extends State<HomeShell> {
       if (!mounted) {
         return;
       }
+      _player.setQueue(tracks);
       setState(() {
         _tracks = tracks;
-        _currentTrack = tracks.isNotEmpty ? tracks.first : null;
+        _hasAllFilesAccess = allFiles;
         _loadingLibrary = false;
       });
     } catch (error) {
@@ -128,6 +194,17 @@ class _HomeShellState extends State<HomeShell> {
     }
   }
 
+  void _onPlayerChanged() {
+    final track = _player.currentTrack;
+    if (track != null && _player.isPlaying && track.id != _lastRecentTrackId) {
+      _lastRecentTrackId = track.id;
+      _rememberRecent(track);
+    }
+    if (mounted) {
+      setState(() {});
+    }
+  }
+
   void _selectPage(int index) {
     if (index == 3) {
       setState(() => _searchOpen = true);
@@ -136,6 +213,9 @@ class _HomeShellState extends State<HomeShell> {
     setState(() {
       _searchOpen = false;
       _pageIndex = index;
+      if (index == 1) {
+        _libraryMode = LibraryMode.all;
+      }
     });
     _pageController.animateToPage(
       index,
@@ -144,26 +224,95 @@ class _HomeShellState extends State<HomeShell> {
     );
   }
 
-  void _selectTrack(MusicTrack track, {bool play = true}) {
+  Future<void> _selectTrack(
+    MusicTrack track, {
+    List<MusicTrack>? queue,
+  }) async {
+    await _player.playTrack(track, playlist: queue ?? _tracks);
+    _rememberRecent(track);
+  }
+
+  void _rememberRecent(MusicTrack track) {
+    _recentIds.remove(track.id);
+    _recentIds.insert(0, track.id);
+    if (_recentIds.length > 50) {
+      _recentIds.removeRange(50, _recentIds.length);
+    }
+    _scheduleSaveState();
+  }
+
+  void _toggleFavorite(MusicTrack track) {
     setState(() {
-      _currentTrack = track;
-      _isPlaying = play;
+      if (_favoriteIds.contains(track.id)) {
+        _favoriteIds.remove(track.id);
+      } else {
+        _favoriteIds.add(track.id);
+      }
+    });
+    _scheduleSaveState();
+  }
+
+  void _scheduleSaveState() {
+    _saveTimer?.cancel();
+    _saveTimer = Timer(const Duration(milliseconds: 250), () {
+      MusicLibrary.saveUserState(
+        favoriteIds: _favoriteIds,
+        recentIds: _recentIds,
+      );
     });
   }
 
-  void _playNext() {
-    if (_tracks.isEmpty) {
-      return;
+  void _openLibrary(LibraryMode mode) {
+    setState(() {
+      _libraryMode = mode;
+      _pageIndex = 1;
+      _searchOpen = false;
+    });
+    _pageController.animateToPage(
+      1,
+      duration: const Duration(milliseconds: 290),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
+  Future<void> _openAllFilesSettings() async {
+    await MusicLibrary.openAllFilesSettings();
+    final access = await MusicLibrary.hasAllFilesAccess();
+    if (mounted) {
+      setState(() => _hasAllFilesAccess = access);
     }
-    final current = _currentTrack;
-    final index = current == null ? -1 : _tracks.indexOf(current);
-    final next = _tracks[(index + 1) % _tracks.length];
-    _selectTrack(next, play: _isPlaying);
+  }
+
+  List<MusicTrack> get _recentTracks {
+    final byId = {for (final track in _tracks) track.id: track};
+    return [
+      for (final id in _recentIds)
+        if (byId[id] != null) byId[id]!,
+    ];
+  }
+
+  List<MusicTrack> get _favoriteTracks {
+    return _tracks.where((track) => _favoriteIds.contains(track.id)).toList();
+  }
+
+  List<MusicTrack> _tracksForMode(LibraryMode mode) {
+    switch (mode) {
+      case LibraryMode.all:
+        return _tracks;
+      case LibraryMode.recent:
+        return _recentTracks;
+      case LibraryMode.favorites:
+        return _favoriteTracks;
+      case LibraryMode.lyrics:
+        return _tracks
+            .where((track) => track.lyricsPath != null && track.lyricsPath!.isNotEmpty)
+            .toList();
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    final current = _currentTrack ?? DemoTracks.placeholder;
+    final current = _player.currentTrack ?? DemoTracks.placeholder;
     final bottomInset = MediaQuery.of(context).padding.bottom;
 
     return Scaffold(
@@ -183,32 +332,56 @@ class _HomeShellState extends State<HomeShell> {
                   children: [
                     HomePage(
                       tracks: _tracks,
+                      recentTracks: _recentTracks,
                       currentTrack: current,
+                      isPlaying: _player.isPlaying,
+                      progress: _player.progress,
                       isLoading: _loadingLibrary,
                       error: _libraryError,
+                      hasAllFilesAccess: _hasAllFilesAccess,
                       onRefresh: _loadLibrary,
-                      onTrackSelected: _selectTrack,
+                      onTrackSelected: (track) => _selectTrack(track),
+                      onOpenLibrary: _openLibrary,
                     ),
                     LibraryPage(
-                      tracks: _tracks,
+                      mode: _libraryMode,
+                      tracks: _tracksForMode(_libraryMode),
+                      allCount: _tracks.length,
+                      recentCount: _recentTracks.length,
+                      favoriteCount: _favoriteTracks.length,
+                      lyricsCount: _tracksForMode(LibraryMode.lyrics).length,
                       isLoading: _loadingLibrary,
                       error: _libraryError,
+                      favoriteIds: _favoriteIds,
+                      currentTrackId: _player.currentTrack?.id,
+                      onModeChanged: (mode) => setState(() => _libraryMode = mode),
                       onRefresh: _loadLibrary,
-                      onTrackSelected: _selectTrack,
+                      onTrackSelected: (track) => _selectTrack(
+                        track,
+                        queue: _tracksForMode(_libraryMode),
+                      ),
+                      onToggleFavorite: _toggleFavorite,
                     ),
                     ProfilePage(
                       trackCount: _tracks.length,
+                      favoriteCount: _favoriteTracks.length,
+                      lyricsCount: _tracksForMode(LibraryMode.lyrics).length,
+                      recentCount: _recentTracks.length,
                       currentTrack: current,
+                      hasAllFilesAccess: _hasAllFilesAccess,
+                      onOpenAllFilesSettings: _openAllFilesSettings,
+                      onRefresh: _loadLibrary,
                     ),
                   ],
                 ),
               ),
               MiniPlayer(
                 track: current,
-                isPlaying: _isPlaying,
+                isPlaying: _player.isPlaying,
+                progress: _player.progress,
                 onTap: () => setState(() => _playerOpen = true),
-                onTogglePlay: () => setState(() => _isPlaying = !_isPlaying),
-                onNext: _playNext,
+                onTogglePlay: _player.togglePlay,
+                onNext: _player.next,
               ),
               BottomTileNav(
                 selectedIndex: _pageIndex,
@@ -222,27 +395,20 @@ class _HomeShellState extends State<HomeShell> {
             open: _searchOpen,
             controller: _searchController,
             tracks: _tracks,
+            favoriteIds: _favoriteIds,
             onClose: () => setState(() => _searchOpen = false),
             onTrackSelected: (track) {
               _selectTrack(track);
               setState(() => _searchOpen = false);
             },
+            onToggleFavorite: _toggleFavorite,
           ),
           if (_playerOpen)
             FullPlayerOverlay(
+              player: _player,
               track: current,
-              isPlaying: _isPlaying,
-              onTogglePlay: () => setState(() => _isPlaying = !_isPlaying),
-              onNext: _playNext,
-              onPrevious: () {
-                if (_tracks.isEmpty) {
-                  return;
-                }
-                final index = _tracks.indexOf(current);
-                final previous = _tracks[
-                    (index <= 0 ? _tracks.length : index) - 1];
-                _selectTrack(previous, play: _isPlaying);
-              },
+              isFavorite: _favoriteIds.contains(current.id),
+              onToggleFavorite: () => _toggleFavorite(current),
               onClosed: () => setState(() => _playerOpen = false),
             ),
         ],
@@ -254,76 +420,100 @@ class _HomeShellState extends State<HomeShell> {
 class HomePage extends StatelessWidget {
   const HomePage({
     required this.tracks,
+    required this.recentTracks,
     required this.currentTrack,
+    required this.isPlaying,
+    required this.progress,
     required this.isLoading,
     required this.error,
+    required this.hasAllFilesAccess,
     required this.onRefresh,
     required this.onTrackSelected,
+    required this.onOpenLibrary,
     super.key,
   });
 
   final List<MusicTrack> tracks;
+  final List<MusicTrack> recentTracks;
   final MusicTrack currentTrack;
+  final bool isPlaying;
+  final double progress;
   final bool isLoading;
   final String? error;
+  final bool hasAllFilesAccess;
   final VoidCallback onRefresh;
   final ValueChanged<MusicTrack> onTrackSelected;
+  final ValueChanged<LibraryMode> onOpenLibrary;
 
   @override
   Widget build(BuildContext context) {
     final top = MediaQuery.of(context).padding.top;
-    final recent = tracks.take(6).toList();
+    final visibleTracks = recentTracks.isEmpty ? tracks.take(8).toList() : recentTracks.take(8).toList();
+    final lyricsCount = tracks.where((track) => track.lyricsPath != null && track.lyricsPath!.isNotEmpty).length;
 
     return ColoredBox(
       color: LisnColors.ink,
       child: CustomScrollView(
         slivers: [
-          SliverToBoxAdapter(
-            child: SizedBox(height: top),
-          ),
+          SliverToBoxAdapter(child: SizedBox(height: top)),
           SliverToBoxAdapter(
             child: SizedBox(
-              height: 192,
+              height: 202,
               child: Row(
                 children: [
                   Expanded(
                     flex: 2,
                     child: TileBlock(
                       color: LisnColors.cyan,
-                      child: Padding(
-                        padding: const EdgeInsets.all(18),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisAlignment: MainAxisAlignment.end,
-                          children: [
-                            const Text(
-                              'Lisn',
-                              style: TextStyle(
-                                fontSize: 44,
-                                fontWeight: FontWeight.w800,
-                                letterSpacing: 0,
+                      child: InkWell(
+                        onTap: tracks.isEmpty ? null : () => onTrackSelected(currentTrack),
+                        child: Padding(
+                          padding: const EdgeInsets.all(18),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            mainAxisAlignment: MainAxisAlignment.end,
+                            children: [
+                              const Text(
+                                'Lisn',
+                                style: TextStyle(
+                                  fontSize: 44,
+                                  fontWeight: FontWeight.w900,
+                                  letterSpacing: 0,
+                                ),
                               ),
-                            ),
-                            const SizedBox(height: 8),
-                            Text(
-                              currentTrack.title,
-                              maxLines: 2,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                fontSize: 17,
-                                fontWeight: FontWeight.w600,
+                              const SizedBox(height: 8),
+                              Text(
+                                currentTrack.title,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontSize: 17,
+                                  fontWeight: FontWeight.w700,
+                                ),
                               ),
-                            ),
-                            Text(
-                              currentTrack.artist,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                color: Color(0xDFFFFFFF),
-                                fontSize: 13,
+                              const SizedBox(height: 2),
+                              Text(
+                                isPlaying ? '正在播放 · ${currentTrack.artist}' : currentTrack.artist,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: Color(0xDFFFFFFF),
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                ),
                               ),
-                            ),
-                          ],
+                              const SizedBox(height: 12),
+                              ClipRRect(
+                                borderRadius: BorderRadius.zero,
+                                child: LinearProgressIndicator(
+                                  value: progress,
+                                  minHeight: 6,
+                                  color: LisnColors.ink,
+                                  backgroundColor: Colors.white54,
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ),
@@ -343,6 +533,7 @@ class HomePage extends StatelessWidget {
                         Expanded(
                           child: TileButton(
                             color: LisnColors.amber,
+                            foreground: LisnColors.ink,
                             icon: Icons.sync_rounded,
                             label: '扫描',
                             onTap: onRefresh,
@@ -357,32 +548,32 @@ class HomePage extends StatelessWidget {
           ),
           SliverToBoxAdapter(
             child: SizedBox(
-              height: 118,
+              height: 120,
               child: Row(
                 children: [
                   Expanded(
                     child: TileButton(
                       color: LisnColors.panelAlt,
                       icon: Icons.history_rounded,
-                      label: '最近播放',
-                      onTap: () {},
+                      label: '最近',
+                      onTap: () => onOpenLibrary(LibraryMode.recent),
                     ),
                   ),
                   Expanded(
                     child: TileButton(
                       color: LisnColors.violet,
-                      icon: Icons.folder_rounded,
-                      label: '本地音乐',
-                      onTap: () {},
+                      icon: Icons.library_music_rounded,
+                      label: '本地',
+                      onTap: () => onOpenLibrary(LibraryMode.all),
                     ),
                   ),
                   Expanded(
                     child: TileButton(
                       color: LisnColors.lime,
                       foreground: LisnColors.ink,
-                      icon: Icons.favorite_rounded,
-                      label: '收藏',
-                      onTap: () {},
+                      icon: Icons.lyrics_rounded,
+                      label: '$lyricsCount 词',
+                      onTap: () => onOpenLibrary(LibraryMode.lyrics),
                     ),
                   ),
                 ],
@@ -394,9 +585,10 @@ class HomePage extends StatelessWidget {
               isLoading: isLoading,
               error: error,
               trackCount: tracks.length,
+              hasAllFilesAccess: hasAllFilesAccess,
             ),
           ),
-          if (recent.isEmpty && !isLoading)
+          if (visibleTracks.isEmpty && !isLoading)
             SliverFillRemaining(
               hasScrollBody: false,
               child: EmptyLibrary(onRefresh: onRefresh, error: error),
@@ -405,14 +597,17 @@ class HomePage extends StatelessWidget {
             SliverList(
               delegate: SliverChildBuilderDelegate(
                 (context, index) {
-                  final track = recent[index];
+                  final track = visibleTracks[index];
                   return TrackTile(
                     track: track,
                     accent: LisnPalette.byIndex(index),
+                    current: track.id == currentTrack.id && isPlaying,
+                    isFavorite: false,
                     onTap: () => onTrackSelected(track),
+                    onToggleFavorite: null,
                   );
                 },
-                childCount: recent.length,
+                childCount: visibleTracks.length,
               ),
             ),
         ],
@@ -423,19 +618,37 @@ class HomePage extends StatelessWidget {
 
 class LibraryPage extends StatelessWidget {
   const LibraryPage({
+    required this.mode,
     required this.tracks,
+    required this.allCount,
+    required this.recentCount,
+    required this.favoriteCount,
+    required this.lyricsCount,
     required this.isLoading,
     required this.error,
+    required this.favoriteIds,
+    required this.currentTrackId,
+    required this.onModeChanged,
     required this.onRefresh,
     required this.onTrackSelected,
+    required this.onToggleFavorite,
     super.key,
   });
 
+  final LibraryMode mode;
   final List<MusicTrack> tracks;
+  final int allCount;
+  final int recentCount;
+  final int favoriteCount;
+  final int lyricsCount;
   final bool isLoading;
   final String? error;
+  final Set<String> favoriteIds;
+  final String? currentTrackId;
+  final ValueChanged<LibraryMode> onModeChanged;
   final VoidCallback onRefresh;
   final ValueChanged<MusicTrack> onTrackSelected;
+  final ValueChanged<MusicTrack> onToggleFavorite;
 
   @override
   Widget build(BuildContext context) {
@@ -448,22 +661,22 @@ class LibraryPage extends StatelessWidget {
             child: Padding(
               padding: EdgeInsets.only(top: top),
               child: SizedBox(
-                height: 120,
+                height: 132,
                 child: Row(
                   children: [
-                    const Expanded(
+                    Expanded(
                       flex: 2,
                       child: TileBlock(
                         color: LisnColors.panel,
                         child: Padding(
-                          padding: EdgeInsets.all(18),
+                          padding: const EdgeInsets.all(18),
                           child: Align(
                             alignment: Alignment.bottomLeft,
                             child: Text(
-                              '库',
-                              style: TextStyle(
+                              mode.label,
+                              style: const TextStyle(
                                 fontSize: 40,
-                                fontWeight: FontWeight.w800,
+                                fontWeight: FontWeight.w900,
                                 letterSpacing: 0,
                               ),
                             ),
@@ -485,16 +698,61 @@ class LibraryPage extends StatelessWidget {
             ),
           ),
           SliverToBoxAdapter(
+            child: SizedBox(
+              height: 82,
+              child: Row(
+                children: [
+                  Expanded(
+                    child: ModeTile(
+                      mode: LibraryMode.all,
+                      selected: mode == LibraryMode.all,
+                      count: allCount,
+                      onTap: onModeChanged,
+                    ),
+                  ),
+                  Expanded(
+                    child: ModeTile(
+                      mode: LibraryMode.recent,
+                      selected: mode == LibraryMode.recent,
+                      count: recentCount,
+                      onTap: onModeChanged,
+                    ),
+                  ),
+                  Expanded(
+                    child: ModeTile(
+                      mode: LibraryMode.favorites,
+                      selected: mode == LibraryMode.favorites,
+                      count: favoriteCount,
+                      onTap: onModeChanged,
+                    ),
+                  ),
+                  Expanded(
+                    child: ModeTile(
+                      mode: LibraryMode.lyrics,
+                      selected: mode == LibraryMode.lyrics,
+                      count: lyricsCount,
+                      onTap: onModeChanged,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          SliverToBoxAdapter(
             child: StatusStrip(
               isLoading: isLoading,
               error: error,
-              trackCount: tracks.length,
+              trackCount: allCount,
+              hasAllFilesAccess: true,
             ),
           ),
           if (tracks.isEmpty && !isLoading)
             SliverFillRemaining(
               hasScrollBody: false,
-              child: EmptyLibrary(onRefresh: onRefresh, error: error),
+              child: EmptyLibrary(
+                onRefresh: onRefresh,
+                error: mode == LibraryMode.all ? error : '${mode.label}列表为空',
+              ),
             )
           else
             SliverList(
@@ -504,7 +762,10 @@ class LibraryPage extends StatelessWidget {
                   return TrackTile(
                     track: track,
                     accent: LisnPalette.byIndex(index),
+                    current: track.id == currentTrackId,
+                    isFavorite: favoriteIds.contains(track.id),
                     onTap: () => onTrackSelected(track),
+                    onToggleFavorite: () => onToggleFavorite(track),
                   );
                 },
                 childCount: tracks.length,
@@ -519,12 +780,24 @@ class LibraryPage extends StatelessWidget {
 class ProfilePage extends StatelessWidget {
   const ProfilePage({
     required this.trackCount,
+    required this.favoriteCount,
+    required this.lyricsCount,
+    required this.recentCount,
     required this.currentTrack,
+    required this.hasAllFilesAccess,
+    required this.onOpenAllFilesSettings,
+    required this.onRefresh,
     super.key,
   });
 
   final int trackCount;
+  final int favoriteCount;
+  final int lyricsCount;
+  final int recentCount;
   final MusicTrack currentTrack;
+  final bool hasAllFilesAccess;
+  final VoidCallback onOpenAllFilesSettings;
+  final VoidCallback onRefresh;
 
   @override
   Widget build(BuildContext context) {
@@ -550,7 +823,7 @@ class ProfilePage extends StatelessWidget {
                           '我的',
                           style: TextStyle(
                             fontSize: 40,
-                            fontWeight: FontWeight.w800,
+                            fontWeight: FontWeight.w900,
                             letterSpacing: 0,
                           ),
                         ),
@@ -575,12 +848,31 @@ class ProfilePage extends StatelessWidget {
                   child: TileBlock(
                     color: LisnColors.amber,
                     child: StatTile(
-                      label: '当前',
-                      value: currentTrack.durationLabel,
+                      label: '收藏',
+                      value: '$favoriteCount',
                       darkText: true,
                     ),
                   ),
                 ),
+                Expanded(
+                  child: TileBlock(
+                    color: LisnColors.violet,
+                    child: StatTile(label: '歌词', value: '$lyricsCount'),
+                  ),
+                ),
+                Expanded(
+                  child: TileBlock(
+                    color: LisnColors.panelAlt,
+                    child: StatTile(label: '最近', value: '$recentCount'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          SizedBox(
+            height: 132,
+            child: Row(
+              children: [
                 Expanded(
                   flex: 2,
                   child: TileBlock(
@@ -597,7 +889,7 @@ class ProfilePage extends StatelessWidget {
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
                               fontSize: 20,
-                              fontWeight: FontWeight.w700,
+                              fontWeight: FontWeight.w800,
                             ),
                           ),
                           const SizedBox(height: 8),
@@ -615,39 +907,15 @@ class ProfilePage extends StatelessWidget {
                     ),
                   ),
                 ),
-              ],
-            ),
-          ),
-          const SizedBox(
-            height: 118,
-            child: Row(
-              children: [
                 Expanded(
-                  child: TileBlock(
-                    color: LisnColors.violet,
-                    child: Center(
-                      child: Icon(Icons.equalizer_rounded, size: 32),
-                    ),
-                  ),
-                ),
-                Expanded(
-                  child: TileBlock(
-                    color: LisnColors.cyan,
-                    child: Center(
-                      child: Icon(Icons.palette_rounded, size: 32),
-                    ),
-                  ),
-                ),
-                Expanded(
-                  child: TileBlock(
-                    color: LisnColors.lime,
-                    child: Center(
-                      child: Icon(
-                        Icons.offline_bolt_rounded,
-                        color: LisnColors.ink,
-                        size: 32,
-                      ),
-                    ),
+                  child: TileButton(
+                    color: hasAllFilesAccess ? LisnColors.lime : LisnColors.orange,
+                    foreground: hasAllFilesAccess ? LisnColors.ink : LisnColors.text,
+                    icon: hasAllFilesAccess
+                        ? Icons.folder_open_rounded
+                        : Icons.admin_panel_settings_rounded,
+                    label: hasAllFilesAccess ? '歌词权限' : '授权歌词',
+                    onTap: hasAllFilesAccess ? onRefresh : onOpenAllFilesSettings,
                   ),
                 ),
               ],
@@ -664,16 +932,20 @@ class SearchPanel extends StatefulWidget {
     required this.open,
     required this.controller,
     required this.tracks,
+    required this.favoriteIds,
     required this.onClose,
     required this.onTrackSelected,
+    required this.onToggleFavorite,
     super.key,
   });
 
   final bool open;
   final TextEditingController controller;
   final List<MusicTrack> tracks;
+  final Set<String> favoriteIds;
   final VoidCallback onClose;
   final ValueChanged<MusicTrack> onTrackSelected;
+  final ValueChanged<MusicTrack> onToggleFavorite;
 
   @override
   State<SearchPanel> createState() => _SearchPanelState();
@@ -701,29 +973,27 @@ class _SearchPanelState extends State<SearchPanel> {
     super.dispose();
   }
 
-  void _onQueryChanged() {
-    setState(() {});
-  }
+  void _onQueryChanged() => setState(() {});
 
   @override
   Widget build(BuildContext context) {
     final topInset = MediaQuery.of(context).padding.top;
-    final height = math.min(MediaQuery.of(context).size.height * 0.72, 560.0);
+    final height = math.min(MediaQuery.of(context).size.height * 0.72, 580.0);
     final query = widget.controller.text.trim().toLowerCase();
     final results = query.isEmpty
-        ? widget.tracks.take(8).toList()
+        ? widget.tracks.take(12).toList()
         : widget.tracks.where((track) {
             return track.title.toLowerCase().contains(query) ||
                 track.artist.toLowerCase().contains(query) ||
                 track.fileName.toLowerCase().contains(query);
-          }).take(24).toList();
+          }).take(40).toList();
 
     return IgnorePointer(
       ignoring: !widget.open,
       child: Stack(
         children: [
           AnimatedOpacity(
-            opacity: widget.open ? 0.6 : 0,
+            opacity: widget.open ? 0.62 : 0,
             duration: const Duration(milliseconds: 220),
             child: GestureDetector(
               onTap: widget.onClose,
@@ -748,7 +1018,11 @@ class _SearchPanelState extends State<SearchPanel> {
                       controller: widget.controller,
                       autofocus: widget.open,
                       cursorColor: LisnColors.cyan,
-                      style: const TextStyle(fontSize: 18),
+                      style: const TextStyle(
+                        color: LisnColors.ink,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w600,
+                      ),
                       decoration: InputDecoration(
                         filled: true,
                         fillColor: LisnColors.text,
@@ -787,7 +1061,10 @@ class _SearchPanelState extends State<SearchPanel> {
                               return TrackTile(
                                 track: track,
                                 accent: LisnPalette.byIndex(index),
+                                current: false,
+                                isFavorite: widget.favoriteIds.contains(track.id),
                                 onTap: () => widget.onTrackSelected(track),
+                                onToggleFavorite: () => widget.onToggleFavorite(track),
                               );
                             },
                           ),
@@ -806,6 +1083,7 @@ class MiniPlayer extends StatelessWidget {
   const MiniPlayer({
     required this.track,
     required this.isPlaying,
+    required this.progress,
     required this.onTap,
     required this.onTogglePlay,
     required this.onNext,
@@ -814,6 +1092,7 @@ class MiniPlayer extends StatelessWidget {
 
   final MusicTrack track;
   final bool isPlaying;
+  final double progress;
   final VoidCallback onTap;
   final VoidCallback onTogglePlay;
   final VoidCallback onNext;
@@ -825,51 +1104,66 @@ class MiniPlayer extends StatelessWidget {
       child: InkWell(
         onTap: onTap,
         child: SizedBox(
-          height: 76,
-          child: Row(
+          height: 78,
+          child: Stack(
             children: [
-              AlbumTile(track: track, size: 76),
-              Expanded(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 14),
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        track.title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w700,
+              Positioned.fill(
+                child: Row(
+                  children: [
+                    AlbumTile(track: track, size: 78),
+                    Expanded(
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 14),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              track.title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              track.artist,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 12,
+                                color: LisnColors.muted,
+                              ),
+                            ),
+                          ],
                         ),
                       ),
-                      const SizedBox(height: 4),
-                      Text(
-                        track.artist,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          fontSize: 12,
-                          color: LisnColors.muted,
-                        ),
-                      ),
-                    ],
-                  ),
+                    ),
+                    SquareIconButton(
+                      icon: isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                      label: isPlaying ? '暂停' : '播放',
+                      onTap: onTogglePlay,
+                    ),
+                    SquareIconButton(
+                      icon: Icons.skip_next_rounded,
+                      label: '下一曲',
+                      onTap: onNext,
+                    ),
+                  ],
                 ),
               ),
-              SquareIconButton(
-                icon: isPlaying
-                    ? Icons.pause_rounded
-                    : Icons.play_arrow_rounded,
-                label: isPlaying ? '暂停' : '播放',
-                onTap: onTogglePlay,
-              ),
-              SquareIconButton(
-                icon: Icons.skip_next_rounded,
-                label: '下一曲',
-                onTap: onNext,
+              Positioned(
+                left: 78,
+                right: 0,
+                bottom: 0,
+                child: LinearProgressIndicator(
+                  value: progress,
+                  minHeight: 3,
+                  color: LisnColors.cyan,
+                  backgroundColor: LisnColors.panelAlt,
+                ),
               ),
             ],
           ),
@@ -959,8 +1253,7 @@ class _NavTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final foreground =
-        selected && darkSelected ? LisnColors.ink : LisnColors.text;
+    final foreground = selected && darkSelected ? LisnColors.ink : LisnColors.text;
     return Expanded(
       child: Semantics(
         button: true,
@@ -983,8 +1276,7 @@ class _NavTile extends StatelessWidget {
                     style: TextStyle(
                       color: foreground,
                       fontSize: 12,
-                      fontWeight:
-                          selected ? FontWeight.w800 : FontWeight.w500,
+                      fontWeight: selected ? FontWeight.w800 : FontWeight.w500,
                     ),
                   ),
                 ],
@@ -999,20 +1291,18 @@ class _NavTile extends StatelessWidget {
 
 class FullPlayerOverlay extends StatefulWidget {
   const FullPlayerOverlay({
+    required this.player,
     required this.track,
-    required this.isPlaying,
-    required this.onTogglePlay,
-    required this.onNext,
-    required this.onPrevious,
+    required this.isFavorite,
+    required this.onToggleFavorite,
     required this.onClosed,
     super.key,
   });
 
+  final PlaybackController player;
   final MusicTrack track;
-  final bool isPlaying;
-  final VoidCallback onTogglePlay;
-  final VoidCallback onNext;
-  final VoidCallback onPrevious;
+  final bool isFavorite;
+  final VoidCallback onToggleFavorite;
   final VoidCallback onClosed;
 
   @override
@@ -1067,7 +1357,7 @@ class _FullPlayerOverlayState extends State<FullPlayerOverlay>
     return Material(
       color: Colors.transparent,
       child: AnimatedBuilder(
-        animation: _controller,
+        animation: Listenable.merge([_controller, widget.player]),
         builder: (context, child) {
           final backdrop = Curves.easeOut.transform(_controller.value);
           final volume = _interval(0.00, 0.46, Curves.easeOutCubic);
@@ -1076,10 +1366,11 @@ class _FullPlayerOverlayState extends State<FullPlayerOverlay>
           final title = _interval(0.12, 0.72, Curves.easeOutQuart);
           final cover = _interval(0.02, 0.88, Curves.easeOutBack);
           final topBand = topInset + 54;
-          final bottomStack = 84 + 92 + 76 + bottomInset;
+          final bottomStack = 84 + 92 + 82 + bottomInset;
           final artTop = topBand;
-          final artBottom = bottomStack + 92;
-          final artHeight = math.max(170.0, size.height - artTop - artBottom);
+          final artBottom = bottomStack + 150;
+          final artHeight = math.max(150.0, size.height - artTop - artBottom);
+          final lyricsHeight = math.min(148.0, math.max(96.0, size.height * 0.18));
 
           return Stack(
             children: [
@@ -1114,7 +1405,13 @@ class _FullPlayerOverlayState extends State<FullPlayerOverlay>
                           ),
                         ),
                       ),
-                      const SizedBox(width: 54),
+                      SquareIconButton(
+                        icon: widget.isFavorite
+                            ? Icons.favorite_rounded
+                            : Icons.favorite_border_rounded,
+                        label: widget.isFavorite ? '取消收藏' : '收藏',
+                        onTap: widget.onToggleFavorite,
+                      ),
                     ],
                   ),
                 ),
@@ -1139,7 +1436,7 @@ class _FullPlayerOverlayState extends State<FullPlayerOverlay>
               Positioned(
                 left: 0,
                 right: 0,
-                bottom: bottomStack,
+                bottom: bottomStack + lyricsHeight,
                 height: 92,
                 child: GestureDetector(
                   onHorizontalDragEnd: (details) {
@@ -1156,8 +1453,23 @@ class _FullPlayerOverlayState extends State<FullPlayerOverlay>
               Positioned(
                 left: 0,
                 right: 0,
+                bottom: bottomStack,
+                height: lyricsHeight,
+                child: Transform.translate(
+                  offset: Offset(-size.width * 0.42 * (1 - title), 0),
+                  child: LyricsBand(
+                    track: widget.track,
+                    lines: widget.player.lyrics,
+                    currentIndex: widget.player.currentLyricIndex(),
+                    error: widget.player.lyricsError,
+                  ),
+                ),
+              ),
+              Positioned(
+                left: 0,
+                right: 0,
                 bottom: 176 + bottomInset,
-                height: 76,
+                height: 82,
                 child: GestureDetector(
                   onVerticalDragEnd: (details) {
                     if ((details.primaryVelocity ?? 0) > 260) {
@@ -1166,7 +1478,11 @@ class _FullPlayerOverlayState extends State<FullPlayerOverlay>
                   },
                   child: Transform.translate(
                     offset: Offset(0, 140 * (1 - progress)),
-                    child: PlayerProgress(track: widget.track),
+                    child: PlayerProgress(
+                      position: widget.player.position,
+                      duration: widget.player.duration,
+                      onSeek: widget.player.seekTo,
+                    ),
                   ),
                 ),
               ),
@@ -1184,10 +1500,10 @@ class _FullPlayerOverlayState extends State<FullPlayerOverlay>
                   child: Transform.translate(
                     offset: Offset(0, 160 * (1 - controls)),
                     child: PlayerControlBand(
-                      isPlaying: widget.isPlaying,
-                      onPrevious: widget.onPrevious,
-                      onTogglePlay: widget.onTogglePlay,
-                      onNext: widget.onNext,
+                      isPlaying: widget.player.isPlaying,
+                      onPrevious: widget.player.previous,
+                      onTogglePlay: widget.player.togglePlay,
+                      onNext: widget.player.next,
                     ),
                   ),
                 ),
@@ -1207,7 +1523,10 @@ class _FullPlayerOverlayState extends State<FullPlayerOverlay>
                     offset: Offset(0, 140 * (1 - volume)),
                     child: Padding(
                       padding: EdgeInsets.only(bottom: bottomInset),
-                      child: const PlayerVolumeBand(),
+                      child: PlayerVolumeBand(
+                        volume: widget.player.volume,
+                        onChanged: widget.player.setVolume,
+                      ),
                     ),
                   ),
                 ),
@@ -1225,10 +1544,10 @@ class PlayerMosaicBackground extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ColoredBox(
+    return const ColoredBox(
       color: LisnColors.ink,
       child: Column(
-        children: const [
+        children: [
           Expanded(
             flex: 3,
             child: Row(
@@ -1273,6 +1592,7 @@ class PlayerCover extends StatelessWidget {
     final letter = track.title.isEmpty
         ? 'L'
         : String.fromCharCodes(track.title.runes.take(1)).toUpperCase();
+    final foreground = color.computeLuminance() > 0.45 ? LisnColors.ink : Colors.white;
     return ColoredBox(
       color: color,
       child: Stack(
@@ -1280,13 +1600,7 @@ class PlayerCover extends StatelessWidget {
           Positioned(
             left: 18,
             top: 18,
-            child: Icon(
-              Icons.album_rounded,
-              color: color.computeLuminance() > 0.45
-                  ? LisnColors.ink
-                  : Colors.white,
-              size: 54,
-            ),
+            child: Icon(Icons.album_rounded, color: foreground, size: 54),
           ),
           Positioned(
             right: -28,
@@ -1294,14 +1608,26 @@ class PlayerCover extends StatelessWidget {
             child: Text(
               letter,
               style: TextStyle(
-                color: (color.computeLuminance() > 0.45
-                        ? LisnColors.ink
-                        : Colors.white)
-                    .withOpacity(0.22),
+                color: foreground.withOpacity(0.22),
                 fontSize: 220,
                 fontWeight: FontWeight.w900,
                 height: 0.8,
                 letterSpacing: 0,
+              ),
+            ),
+          ),
+          Positioned(
+            left: 18,
+            right: 18,
+            bottom: 18,
+            child: Text(
+              track.fileName,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: foreground.withOpacity(0.82),
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
               ),
             ),
           ),
@@ -1348,7 +1674,7 @@ class PlayerTitleBand extends StatelessWidget {
                     style: const TextStyle(
                       color: Color(0xFF4B5563),
                       fontSize: 14,
-                      fontWeight: FontWeight.w600,
+                      fontWeight: FontWeight.w700,
                     ),
                   ),
                 ],
@@ -1358,7 +1684,7 @@ class PlayerTitleBand extends StatelessWidget {
               track.durationLabel,
               style: const TextStyle(
                 color: LisnColors.ink,
-                fontWeight: FontWeight.w800,
+                fontWeight: FontWeight.w900,
               ),
             ),
           ],
@@ -1368,13 +1694,94 @@ class PlayerTitleBand extends StatelessWidget {
   }
 }
 
-class PlayerProgress extends StatelessWidget {
-  const PlayerProgress({required this.track, super.key});
+class LyricsBand extends StatelessWidget {
+  const LyricsBand({
+    required this.track,
+    required this.lines,
+    required this.currentIndex,
+    required this.error,
+    super.key,
+  });
 
   final MusicTrack track;
+  final List<LyricLine> lines;
+  final int currentIndex;
+  final String? error;
 
   @override
   Widget build(BuildContext context) {
+    if (track.lyricsPath == null || track.lyricsPath!.isEmpty) {
+      return const ColoredBox(
+        color: LisnColors.panel,
+        child: Center(
+          child: Text('未找到同名 LRC 歌词', style: TextStyle(color: LisnColors.muted)),
+        ),
+      );
+    }
+
+    if (lines.isEmpty) {
+      return ColoredBox(
+        color: LisnColors.panel,
+        child: Center(
+          child: Text(
+            error ?? '歌词加载中',
+            style: const TextStyle(color: LisnColors.muted),
+          ),
+        ),
+      );
+    }
+
+    final start = math.max(0, currentIndex - 1);
+    final end = math.min(lines.length, currentIndex + 2);
+    final visible = lines.sublist(start, end);
+
+    return ColoredBox(
+      color: LisnColors.panel,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            for (var i = 0; i < visible.length; i++)
+              Expanded(
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    visible[i].text,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: start + i == currentIndex ? LisnColors.text : LisnColors.muted,
+                      fontSize: start + i == currentIndex ? 18 : 13,
+                      fontWeight: start + i == currentIndex ? FontWeight.w900 : FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class PlayerProgress extends StatelessWidget {
+  const PlayerProgress({
+    required this.position,
+    required this.duration,
+    required this.onSeek,
+    super.key,
+  });
+
+  final Duration position;
+  final Duration duration;
+  final ValueChanged<Duration> onSeek;
+
+  @override
+  Widget build(BuildContext context) {
+    final maxMs = math.max(1, duration.inMilliseconds);
+    final value = position.inMilliseconds.clamp(0, maxMs).toDouble();
     return ColoredBox(
       color: LisnColors.panel,
       child: Padding(
@@ -1384,28 +1791,30 @@ class PlayerProgress extends StatelessWidget {
           children: [
             Row(
               children: [
-                const Text(
-                  '0:00',
-                  style: TextStyle(color: LisnColors.muted, fontSize: 12),
+                Text(
+                  formatDuration(position),
+                  style: const TextStyle(color: LisnColors.muted, fontSize: 12),
                 ),
                 const Spacer(),
                 Text(
-                  track.durationLabel,
-                  style: const TextStyle(
-                    color: LisnColors.muted,
-                    fontSize: 12,
-                  ),
+                  duration == Duration.zero ? '--:--' : formatDuration(duration),
+                  style: const TextStyle(color: LisnColors.muted, fontSize: 12),
                 ),
               ],
             ),
-            const SizedBox(height: 9),
-            ClipRRect(
-              borderRadius: BorderRadius.zero,
-              child: LinearProgressIndicator(
-                value: 0.28,
-                minHeight: 8,
-                color: LisnColors.cyan,
-                backgroundColor: LisnColors.panelAlt,
+            SliderTheme(
+              data: SliderTheme.of(context).copyWith(
+                activeTrackColor: LisnColors.cyan,
+                inactiveTrackColor: LisnColors.panelAlt,
+                thumbColor: LisnColors.text,
+                overlayColor: LisnColors.cyan.withOpacity(0.16),
+                trackHeight: 8,
+              ),
+              child: Slider(
+                value: value,
+                min: 0,
+                max: maxMs.toDouble(),
+                onChanged: (next) => onSeek(Duration(milliseconds: next.round())),
               ),
             ),
           ],
@@ -1461,7 +1870,14 @@ class PlayerControlBand extends StatelessWidget {
 }
 
 class PlayerVolumeBand extends StatelessWidget {
-  const PlayerVolumeBand({super.key});
+  const PlayerVolumeBand({
+    required this.volume,
+    required this.onChanged,
+    super.key,
+  });
+
+  final double volume;
+  final ValueChanged<double> onChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -1482,8 +1898,8 @@ class PlayerVolumeBand extends StatelessWidget {
                   trackHeight: 7,
                 ),
                 child: Slider(
-                  value: 0.72,
-                  onChanged: (_) {},
+                  value: volume.clamp(0, 1).toDouble(),
+                  onChanged: onChanged,
                 ),
               ),
             ),
@@ -1582,11 +1998,58 @@ class TileButton extends StatelessWidget {
                   style: TextStyle(
                     color: foreground,
                     fontSize: 15,
-                    fontWeight: FontWeight.w800,
+                    fontWeight: FontWeight.w900,
                   ),
                 ),
               ],
             ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class ModeTile extends StatelessWidget {
+  const ModeTile({
+    required this.mode,
+    required this.selected,
+    required this.count,
+    required this.onTap,
+    super.key,
+  });
+
+  final LibraryMode mode;
+  final bool selected;
+  final int count;
+  final ValueChanged<LibraryMode> onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = selected ? LisnColors.cyan : LisnColors.panelAlt;
+    final foreground = selected ? LisnColors.ink : LisnColors.text;
+    return Material(
+      color: color,
+      child: InkWell(
+        onTap: () => onTap(mode),
+        child: Padding(
+          padding: const EdgeInsets.all(10),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(mode.icon, color: foreground, size: 22),
+              const SizedBox(height: 3),
+              Text(
+                '${mode.label} $count',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: foreground,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ],
           ),
         ),
       ),
@@ -1633,7 +2096,7 @@ class StatTile extends StatelessWidget {
             style: TextStyle(
               color: color.withOpacity(0.78),
               fontSize: 13,
-              fontWeight: FontWeight.w700,
+              fontWeight: FontWeight.w800,
             ),
           ),
         ],
@@ -1647,12 +2110,14 @@ class StatusStrip extends StatelessWidget {
     required this.isLoading,
     required this.error,
     required this.trackCount,
+    required this.hasAllFilesAccess,
     super.key,
   });
 
   final bool isLoading;
   final String? error;
   final int trackCount;
+  final bool hasAllFilesAccess;
 
   @override
   Widget build(BuildContext context) {
@@ -1660,7 +2125,9 @@ class StatusStrip extends StatelessWidget {
         ? '正在扫描 Music 文件夹'
         : error != null
             ? error!
-            : '已读取 Music 文件夹及子文件夹，共 $trackCount 首';
+            : hasAllFilesAccess
+                ? '已读取 Music 文件夹及子文件夹，共 $trackCount 首'
+                : '已读取音频；如歌词缺失，请在“我的”中授权歌词文件访问';
     return ColoredBox(
       color: error == null ? LisnColors.panel : LisnColors.magenta,
       child: SizedBox(
@@ -1680,9 +2147,7 @@ class StatusStrip extends StatelessWidget {
                 )
               else
                 Icon(
-                  error == null
-                      ? Icons.folder_open_rounded
-                      : Icons.error_outline_rounded,
+                  error == null ? Icons.folder_open_rounded : Icons.error_outline_rounded,
                   size: 18,
                 ),
               const SizedBox(width: 10),
@@ -1691,10 +2156,7 @@ class StatusStrip extends StatelessWidget {
                   message,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                  ),
+                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
                 ),
               ),
             ],
@@ -1723,7 +2185,7 @@ class EmptyLibrary extends StatelessWidget {
         const Icon(Icons.music_off_rounded, size: 42, color: LisnColors.muted),
         const SizedBox(height: 12),
         Text(
-          error == null ? 'Music 文件夹里还没有可读取的音频' : '暂时无法读取 Music 文件夹',
+          error == null ? 'Music 文件夹里还没有可读取的音频' : error!,
           textAlign: TextAlign.center,
           style: const TextStyle(color: LisnColors.muted),
         ),
@@ -1745,30 +2207,39 @@ class TrackTile extends StatelessWidget {
   const TrackTile({
     required this.track,
     required this.accent,
+    required this.current,
+    required this.isFavorite,
     required this.onTap,
+    required this.onToggleFavorite,
     super.key,
   });
 
   final MusicTrack track;
   final Color accent;
+  final bool current;
+  final bool isFavorite;
   final VoidCallback onTap;
+  final VoidCallback? onToggleFavorite;
 
   @override
   Widget build(BuildContext context) {
     return Material(
-      color: LisnColors.panel,
+      color: current ? LisnColors.panelAlt : LisnColors.panel,
       child: InkWell(
         onTap: onTap,
         child: SizedBox(
-          height: 72,
+          height: 74,
           child: Row(
             children: [
               ColoredBox(
                 color: accent,
-                child: const SizedBox(
-                  width: 72,
-                  height: 72,
-                  child: Icon(Icons.music_note_rounded, color: Colors.white),
+                child: SizedBox(
+                  width: 74,
+                  height: 74,
+                  child: Icon(
+                    current ? Icons.graphic_eq_rounded : Icons.music_note_rounded,
+                    color: Colors.white,
+                  ),
                 ),
               ),
               Expanded(
@@ -1783,34 +2254,54 @@ class TrackTile extends StatelessWidget {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
-                          fontWeight: FontWeight.w700,
+                          fontWeight: FontWeight.w800,
                           fontSize: 15,
                         ),
                       ),
                       const SizedBox(height: 4),
-                      Text(
-                        track.artist,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: LisnColors.muted,
-                          fontSize: 12,
-                        ),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              track.artist,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: LisnColors.muted,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
+                          if (track.lyricsPath != null && track.lyricsPath!.isNotEmpty)
+                            const Padding(
+                              padding: EdgeInsets.only(left: 8),
+                              child: Icon(Icons.lyrics_rounded, color: LisnColors.cyan, size: 16),
+                            ),
+                        ],
                       ),
                     ],
                   ),
                 ),
               ),
-              Padding(
-                padding: const EdgeInsets.only(right: 14),
-                child: Text(
-                  track.durationLabel,
-                  style: const TextStyle(
-                    color: LisnColors.muted,
-                    fontSize: 12,
-                  ),
-                ),
+              Text(
+                track.durationLabel,
+                style: const TextStyle(color: LisnColors.muted, fontSize: 12),
               ),
+              if (onToggleFavorite != null)
+                SizedBox(
+                  width: 50,
+                  height: 74,
+                  child: IconButton(
+                    tooltip: isFavorite ? '取消收藏' : '收藏',
+                    onPressed: onToggleFavorite,
+                    icon: Icon(
+                      isFavorite ? Icons.favorite_rounded : Icons.favorite_border_rounded,
+                      color: isFavorite ? LisnColors.magenta : LisnColors.muted,
+                    ),
+                  ),
+                )
+              else
+                const SizedBox(width: 14),
             ],
           ),
         ),
@@ -1838,9 +2329,7 @@ class AlbumTile extends StatelessWidget {
         dimension: size,
         child: Icon(
           Icons.album_rounded,
-          color: color.computeLuminance() > 0.45
-              ? LisnColors.ink
-              : Colors.white,
+          color: color.computeLuminance() > 0.45 ? LisnColors.ink : Colors.white,
           size: size * 0.42,
         ),
       ),
@@ -1886,8 +2375,8 @@ class LisnPalette {
     LisnColors.violet,
     LisnColors.amber,
     LisnColors.lime,
-    Color(0xFFFF5A3D),
-    Color(0xFF00C2A8),
+    LisnColors.orange,
+    LisnColors.teal,
   ];
 
   static Color byIndex(int index) => accents[index % accents.length];
